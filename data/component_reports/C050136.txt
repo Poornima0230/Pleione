@@ -1,0 +1,66 @@
+======================================================================
+SIH 26170 - COMPONENT SCREENING REPORT
+======================================================================
+
+Component ID       : C050136
+Lot                 : LOT-005
+Component Type     : IC_A
+
+----------------------------------------------------------------------
+EARLY MEASUREMENTS
+----------------------------------------------------------------------
+Iddq at 0h          : 19.119 µA
+Iddq at 24h         : 25.416 µA
+Early change        : 6.297 µA
+Early drift rate    : 0.262375 µA/hour
+
+----------------------------------------------------------------------
+CURRENT ANOMALY
+----------------------------------------------------------------------
+Anomaly score       : 0.667
+Anomaly level       : MEDIUM
+
+----------------------------------------------------------------------
+FUTURE PREDICTION
+----------------------------------------------------------------------
+Predicted 168h Iddq : 54.047 µA
+Prediction lower    : 50.391 µA
+Prediction upper    : 57.702 µA
+Specification limit : 50.000 µA
+Prediction margin   : -4.047 µA
+
+----------------------------------------------------------------------
+FUTURE DRIFT
+----------------------------------------------------------------------
+Predicted drift     : 0.207902
+Safety slope        : 0.007867
+Drift slope excess  : 0.200035
+Future drift risk   : HIGH
+
+----------------------------------------------------------------------
+RISK ASSESSMENT
+----------------------------------------------------------------------
+Risk score          : 90.00
+Risk level          : CRITICAL
+Decision            : IMMEDIATE_REVIEW
+Primary driver      : PREDICTED_FUTURE_FAILURE
+
+----------------------------------------------------------------------
+WHY WAS THIS COMPONENT FLAGGED?
+----------------------------------------------------------------------
+Some early anomaly indicators triggered | Iddq increased between 0h and 24h | Predicted 168h Iddq exceeds specification limit | Upper prediction bound reaches or exceeds specification limit | Predicted future drift exceeds dynamic safety boundary
+
+----------------------------------------------------------------------
+SCREENING RECOMMENDATION
+----------------------------------------------------------------------
+IMMEDIATE ENGINEERING REVIEW: Prioritize this component for confirmatory screening and investigate the predicted future failure risk.
+
+----------------------------------------------------------------------
+DETAILED EXPLANATION
+----------------------------------------------------------------------
+Component C050136 has been classified as CRITICAL risk. Early Iddq changed from 19.12 µA at 0h to 25.42 µA at 24h. The early drift rate is 0.2624 µA/hour. Current anomaly level is MEDIUM with an anomaly evidence score of 0.67. The model predicts 54.05 µA at 168h. The applicable prototype specification limit is 50.00 µA. The prediction is 4.05 µA above the limit. The 90% prediction interval is approximately 50.39 to 57.70 µA. The predicted future drift is above the dynamic safety boundary. Final screening decision: IMMEDIATE_REVIEW.
+
+======================================================================
+Prototype screening result.
+Not an ISRO-qualified engineering limit or decision.
+======================================================================

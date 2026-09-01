@@ -1,0 +1,66 @@
+======================================================================
+SIH 26170 - COMPONENT SCREENING REPORT
+======================================================================
+
+Component ID       : C030083
+Lot                 : LOT-003
+Component Type     : IC_A
+
+----------------------------------------------------------------------
+EARLY MEASUREMENTS
+----------------------------------------------------------------------
+Iddq at 0h          : 11.035 µA
+Iddq at 24h         : 11.217 µA
+Early change        : 0.182 µA
+Early drift rate    : 0.007583 µA/hour
+
+----------------------------------------------------------------------
+CURRENT ANOMALY
+----------------------------------------------------------------------
+Anomaly score       : 0.000
+Anomaly level       : NONE
+
+----------------------------------------------------------------------
+FUTURE PREDICTION
+----------------------------------------------------------------------
+Predicted 168h Iddq : 12.702 µA
+Prediction lower    : 9.046 µA
+Prediction upper    : 16.357 µA
+Specification limit : 50.000 µA
+Prediction margin   : 37.298 µA
+
+----------------------------------------------------------------------
+FUTURE DRIFT
+----------------------------------------------------------------------
+Predicted drift     : 0.009922
+Safety slope        : 0.007867
+Drift slope excess  : 0.002055
+Future drift risk   : MEDIUM
+
+----------------------------------------------------------------------
+RISK ASSESSMENT
+----------------------------------------------------------------------
+Risk score          : 30.00
+Risk level          : MEDIUM
+Decision            : ENHANCED_MONITORING
+Primary driver      : FUTURE_DRIFT
+
+----------------------------------------------------------------------
+WHY WAS THIS COMPONENT FLAGGED?
+----------------------------------------------------------------------
+Iddq increased between 0h and 24h | Predicted future drift exceeds dynamic safety boundary
+
+----------------------------------------------------------------------
+SCREENING RECOMMENDATION
+----------------------------------------------------------------------
+ENHANCED MONITORING: Continue monitoring and consider additional screening if abnormal behavior persists.
+
+----------------------------------------------------------------------
+DETAILED EXPLANATION
+----------------------------------------------------------------------
+Component C030083 has been classified as MEDIUM risk. Early Iddq changed from 11.04 µA at 0h to 11.22 µA at 24h. The early drift rate is 0.0076 µA/hour. Current anomaly level is NONE with an anomaly evidence score of 0.00. The model predicts 12.70 µA at 168h. The applicable prototype specification limit is 50.00 µA. The prediction remains 37.30 µA below the limit. The 90% prediction interval is approximately 9.05 to 16.36 µA. The predicted future drift is above the dynamic safety boundary. Final screening decision: ENHANCED_MONITORING.
+
+======================================================================
+Prototype screening result.
+Not an ISRO-qualified engineering limit or decision.
+======================================================================

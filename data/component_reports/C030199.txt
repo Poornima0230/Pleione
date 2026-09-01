@@ -1,0 +1,66 @@
+======================================================================
+SIH 26170 - COMPONENT SCREENING REPORT
+======================================================================
+
+Component ID       : C030199
+Lot                 : LOT-003
+Component Type     : IC_A
+
+----------------------------------------------------------------------
+EARLY MEASUREMENTS
+----------------------------------------------------------------------
+Iddq at 0h          : 7.723 µA
+Iddq at 24h         : 7.997 µA
+Early change        : 0.274 µA
+Early drift rate    : 0.011417 µA/hour
+
+----------------------------------------------------------------------
+CURRENT ANOMALY
+----------------------------------------------------------------------
+Anomaly score       : 0.167
+Anomaly level       : LOW
+
+----------------------------------------------------------------------
+FUTURE PREDICTION
+----------------------------------------------------------------------
+Predicted 168h Iddq : 8.705 µA
+Prediction lower    : 5.049 µA
+Prediction upper    : 12.360 µA
+Specification limit : 50.000 µA
+Prediction margin   : 41.295 µA
+
+----------------------------------------------------------------------
+FUTURE DRIFT
+----------------------------------------------------------------------
+Predicted drift     : 0.005843
+Safety slope        : 0.007867
+Drift slope excess  : -0.002024
+Future drift risk   : LOW
+
+----------------------------------------------------------------------
+RISK ASSESSMENT
+----------------------------------------------------------------------
+Risk score          : 5.00
+Risk level          : WATCH
+Decision            : MONITOR
+Primary driver      : FUTURE_DRIFT
+
+----------------------------------------------------------------------
+WHY WAS THIS COMPONENT FLAGGED?
+----------------------------------------------------------------------
+Mild early anomaly evidence detected | Iddq increased between 0h and 24h | Predicted future drift exceeds dynamic safety boundary
+
+----------------------------------------------------------------------
+SCREENING RECOMMENDATION
+----------------------------------------------------------------------
+MONITOR: Track the component during subsequent screening stages.
+
+----------------------------------------------------------------------
+DETAILED EXPLANATION
+----------------------------------------------------------------------
+Component C030199 has been classified as WATCH risk. Early Iddq changed from 7.72 µA at 0h to 8.00 µA at 24h. The early drift rate is 0.0114 µA/hour. Current anomaly level is LOW with an anomaly evidence score of 0.17. The model predicts 8.70 µA at 168h. The applicable prototype specification limit is 50.00 µA. The prediction remains 41.30 µA below the limit. The 90% prediction interval is approximately 5.05 to 12.36 µA. The predicted future drift is above the dynamic safety boundary. Final screening decision: MONITOR.
+
+======================================================================
+Prototype screening result.
+Not an ISRO-qualified engineering limit or decision.
+======================================================================

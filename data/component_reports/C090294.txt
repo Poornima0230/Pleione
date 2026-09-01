@@ -1,0 +1,66 @@
+======================================================================
+SIH 26170 - COMPONENT SCREENING REPORT
+======================================================================
+
+Component ID       : C090294
+Lot                 : LOT-009
+Component Type     : IC_A
+
+----------------------------------------------------------------------
+EARLY MEASUREMENTS
+----------------------------------------------------------------------
+Iddq at 0h          : 12.974 µA
+Iddq at 24h         : 12.962 µA
+Early change        : -0.012 µA
+Early drift rate    : -0.000500 µA/hour
+
+----------------------------------------------------------------------
+CURRENT ANOMALY
+----------------------------------------------------------------------
+Anomaly score       : 0.000
+Anomaly level       : NONE
+
+----------------------------------------------------------------------
+FUTURE PREDICTION
+----------------------------------------------------------------------
+Predicted 168h Iddq : 13.695 µA
+Prediction lower    : 10.040 µA
+Prediction upper    : 17.350 µA
+Specification limit : 50.000 µA
+Prediction margin   : 36.305 µA
+
+----------------------------------------------------------------------
+FUTURE DRIFT
+----------------------------------------------------------------------
+Predicted drift     : 0.004292
+Safety slope        : 0.007867
+Drift slope excess  : -0.003575
+Future drift risk   : LOW
+
+----------------------------------------------------------------------
+RISK ASSESSMENT
+----------------------------------------------------------------------
+Risk score          : 0.00
+Risk level          : LOW
+Decision            : NORMAL
+Primary driver      : FUTURE_DRIFT
+
+----------------------------------------------------------------------
+WHY WAS THIS COMPONENT FLAGGED?
+----------------------------------------------------------------------
+Iddq decreased between 0h and 24h | Predicted future drift exceeds dynamic safety boundary
+
+----------------------------------------------------------------------
+SCREENING RECOMMENDATION
+----------------------------------------------------------------------
+NORMAL MONITORING: No significant early risk identified.
+
+----------------------------------------------------------------------
+DETAILED EXPLANATION
+----------------------------------------------------------------------
+Component C090294 has been classified as LOW risk. Early Iddq changed from 12.97 µA at 0h to 12.96 µA at 24h. The early drift rate is -0.0005 µA/hour. Current anomaly level is NONE with an anomaly evidence score of 0.00. The model predicts 13.70 µA at 168h. The applicable prototype specification limit is 50.00 µA. The prediction remains 36.30 µA below the limit. The 90% prediction interval is approximately 10.04 to 17.35 µA. The predicted future drift is above the dynamic safety boundary. Final screening decision: NORMAL.
+
+======================================================================
+Prototype screening result.
+Not an ISRO-qualified engineering limit or decision.
+======================================================================
