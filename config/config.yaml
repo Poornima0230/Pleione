@@ -1,0 +1,23 @@
+parameters:
+  - iddq
+  - leakage
+
+timepoints:
+  - 0
+  - 24
+  - 96
+  - 168
+
+prediction_horizon: 168
+
+components:
+  default:
+    limits:
+      iddq:
+        min: 0
+        max: 50
+      leakage:
+        min: 0
+        max: 10
+
+missing_value_strategy: interpolate
