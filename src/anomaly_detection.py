@@ -1,1803 +1,1848 @@
 # ============================================================
 # SIH 26170
-# MODULE A: DYNAMIC ANOMALY DETECTION
-# ============================================================
+# MODULE A: DYNAMIC AND COMPONENT-AWARE ANOMALY DETECTION
 #
-# Purpose:
-# Detect components whose behavior is unusual compared with
-# similar components in their manufacturing lot.
+# FLOW
+# ------------------------------------------------------------
+# Batch 1                    -> 2,000 components
+# Batch 1 + Batch 2          -> 4,000
+# Batch 1 + Batch 2 + Batch3 -> 6,000
+# ...
+# All 10 batches             -> 20,000
 #
-# IMPORTANT:
+# For every cumulative stage:
 #
-# Module A is a RETROSPECTIVE dynamic anomaly detector.
+#   Data
+#      ↓
+#   Grouping
+#      ↓
+#   Group Statistics
+#      ↓
+#   Statistical Anomaly Score
+#      +
+#   Isolation Forest Score
+#      ↓
+#   Combined Anomaly Score
+#      ↓
+#   Risk Score
+#      ↓
+#   Screening
+#      ↓
+#   Ground Truth Evaluation
+#      ↓
+#   Explanation
 #
-# It uses the available burn-in history:
-#
-#       0h -> 24h -> 96h -> 168h
-#
-# to determine whether a component behaved abnormally.
-#
-# Module B will separately predict 168h using early data.
-#
-# Methods:
-#
-# 1. Data validation
-# 2. Lot-level robust baseline
-# 3. Multi-timepoint anomaly detection
-# 4. Z-score detection
-# 5. IQR detection
-# 6. Time-series drift analysis
-# 7. Isolation Forest
-# 8. Evidence fusion
-# 9. Risk/severity classification
-# 10. Static vs dynamic screening
-# 11. Explainability
-# 12. Overall evaluation
-# 13. Latent-defect evaluation
-# 14. Results export
-#
+# Ground truth is used ONLY for evaluation.
+# It is NOT used as a detection feature.
 # ============================================================
 
 import os
+import glob
+import time
+import warnings
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from sklearn.ensemble import IsolationForest
-
 from sklearn.metrics import (
-    confusion_matrix,
-    classification_report,
+    accuracy_score,
     precision_score,
     recall_score,
-    f1_score
+    f1_score,
+    confusion_matrix
 )
 
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-FILE_PATH = "data/sih_26170_burn_in_synthetic_dataset.csv"
-
-OUTPUT_PATH = "data/module_A_anomaly_results.csv"
-
-# ------------------------------------------------------------
-# Measurement columns
-# ------------------------------------------------------------
-
-TIMEPOINTS = {
-    "0h": "iddq_0h_uA",
-    "24h": "iddq_24h_uA",
-    "96h": "iddq_96h_uA",
-    "168h": "iddq_168h_uA"
-}
-
-MEASUREMENT_FEATURES = list(TIMEPOINTS.values())
-
-# ------------------------------------------------------------
-# Statistical thresholds
-# ------------------------------------------------------------
-
-Z_THRESHOLD = 3.0
-
-IQR_MULTIPLIER = 1.5
-
-DRIFT_Z_THRESHOLD = 3.0
-
-# ------------------------------------------------------------
-# Isolation Forest configuration
-# ------------------------------------------------------------
-
-ISOLATION_N_ESTIMATORS = 300
-
-# This is a prototype contamination value.
-# It should be tuned using validation data later.
-ISOLATION_CONTAMINATION = 0.10
-
-RANDOM_STATE = 42
+from config_loader import load_config
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# 1. LOAD CONFIGURATION
 # ============================================================
 
-def safe_divide(numerator, denominator):
+CONFIG = load_config()
+
+INPUT_CONFIG = CONFIG["input"]
+GROUP_COLUMNS = CONFIG["grouping"]["columns"]
+
+IDDQ_COLUMNS = CONFIG["measurements"]["iddq"]
+LEAKAGE_COLUMNS = CONFIG["measurements"]["leakage"]
+
+COLUMN_CONFIG = CONFIG["columns"]
+
+COMPONENT_ID_COLUMN = COLUMN_CONFIG["component_id"]
+LOT_ID_COLUMN = COLUMN_CONFIG["lot_id"]
+COMPONENT_TYPE_COLUMN = COLUMN_CONFIG["component_type"]
+TEMPERATURE_COLUMN = COLUMN_CONFIG["temperature"]
+VOLTAGE_COLUMN = COLUMN_CONFIG["voltage"]
+GROUND_TRUTH_COLUMN = COLUMN_CONFIG["ground_truth"]
+ABSOLUTE_LIMIT_COLUMN = COLUMN_CONFIG["absolute_limit"]
+
+IF_CONFIG = CONFIG["isolation_forest"]
+
+STAT_WEIGHT = CONFIG["anomaly_score"]["statistical_weight"]
+IF_WEIGHT = CONFIG["anomaly_score"]["isolation_forest_weight"]
+
+ANOMALY_THRESHOLD = CONFIG["anomaly"]["threshold"]
+
+PASS_THRESHOLD = CONFIG["screening"]["pass_threshold"]
+REVIEW_THRESHOLD = CONFIG["screening"]["review_threshold"]
+OUTPUT_FOLDER = CONFIG["output"]["folder"]
+STAGE_PREFIX = CONFIG["output"]["stage_prefix"]
+FINAL_FILE = CONFIG["output"]["final_file"]
+
+
+# ============================================================
+# 2. CONSTANTS
+# ============================================================
+
+ALL_MEASUREMENT_COLUMNS = IDDQ_COLUMNS + LEAKAGE_COLUMNS
+
+EPSILON = 1e-9
+
+# Minimum number of components required for
+# reliable primary group statistics.
+MIN_GROUP_SIZE = 5
+TEMPERATURE_BIN_SIZE = 1.0
+VOLTAGE_BIN_SIZE = 0.05
+warnings.filterwarnings("ignore")
+
+
+# ============================================================
+# 3. BASIC VALIDATION
+# ============================================================
+
+def validate_config():
+    """Validate important configuration settings."""
+
+    if abs(STAT_WEIGHT + IF_WEIGHT - 1.0) > 1e-6:
+        raise ValueError(
+            "Statistical weight + Isolation Forest weight must equal 1.0"
+        )
+
+    if not (0 <= ANOMALY_THRESHOLD <= 1):
+        raise ValueError(
+            "Anomaly threshold must be between 0 and 1"
+        )
+
+    if not (0 <= PASS_THRESHOLD < REVIEW_THRESHOLD <= 1):
+        raise ValueError(
+            "Screening thresholds must satisfy "
+            "0 <= pass < review <= 1"
+        )
+
+
+def validate_dataframe(df):
+    """Validate that required columns exist."""
+
+    required_columns = [
+        COMPONENT_ID_COLUMN,
+        LOT_ID_COLUMN,
+        COMPONENT_TYPE_COLUMN,
+        TEMPERATURE_COLUMN,
+        VOLTAGE_COLUMN,
+        GROUND_TRUTH_COLUMN,
+        ABSOLUTE_LIMIT_COLUMN
+    ]
+
+    required_columns.extend(ALL_MEASUREMENT_COLUMNS)
+
+    missing_columns = [
+        col for col in required_columns
+        if col not in df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "Missing required columns: "
+            + ", ".join(missing_columns)
+        )
+
+
+# ============================================================
+# 4. FIND BATCH FILES
+# ============================================================
+
+def get_batch_files():
     """
-    Safe division.
-    Returns NaN where denominator is zero.
-    """
-    denominator = denominator.replace(0, np.nan)
+    Find batch CSV files and sort them numerically.
 
-    return numerator / denominator
+    Important:
+    Normal alphabetical sorting would give:
+        batch_1
+        batch_10
+        batch_2
 
-
-def robust_zscore(series):
-    """
-    Robust Z-score based on Median Absolute Deviation (MAD).
-
-    Formula:
-
-        robust_z = 0.6745 * (x - median) / MAD
-
-    This is more resistant to outliers than the traditional
-    mean/std Z-score.
+    We explicitly sort by the batch number.
     """
 
-    median = series.median()
+    folder = INPUT_CONFIG["folder"]
+    pattern = INPUT_CONFIG["file_pattern"]
 
-    mad = np.median(
-        np.abs(series - median)
+    search_pattern = os.path.join(folder, pattern)
+
+    files = glob.glob(search_pattern)
+
+    if not files:
+        raise FileNotFoundError(
+            f"No batch files found using: {search_pattern}"
+        )
+
+    def batch_number(path):
+        filename = os.path.basename(path)
+
+        try:
+            number = int(
+                filename.lower()
+                .replace("batch_", "")
+                .replace(".csv", "")
+            )
+            return number
+        except ValueError:
+            return 999999
+
+    files = sorted(files, key=batch_number)
+
+    expected_batches = INPUT_CONFIG.get("expected_batches")
+
+    if expected_batches is not None:
+        if len(files) < expected_batches:
+            raise ValueError(
+                f"Expected at least {expected_batches} batches "
+                f"but found only {len(files)}."
+            )
+
+        files = files[:expected_batches]
+
+    return files
+
+# ============================================================
+# 5. LOAD ONE BATCH
+# ============================================================
+
+def load_batch(file_path):
+    """Load and clean one batch."""
+
+    df = pd.read_csv(file_path)
+
+    validate_dataframe(df)
+
+    # Convert measurements to numeric
+    numeric_columns = (
+        IDDQ_COLUMNS
+        + LEAKAGE_COLUMNS
+        + [
+            TEMPERATURE_COLUMN,
+            VOLTAGE_COLUMN,
+            ABSOLUTE_LIMIT_COLUMN
+        ]
     )
 
-    if mad == 0 or np.isnan(mad):
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        )
+
+    # Remove rows without component ID
+    df = df.dropna(
+        subset=[COMPONENT_ID_COLUMN]
+    ).copy()
+
+    # Fill numeric missing measurements using
+    # interpolation followed by median.
+    for column in ALL_MEASUREMENT_COLUMNS:
+
+        if df[column].isna().any():
+
+            df[column] = (
+                df[column]
+                .interpolate(limit_direction="both")
+            )
+
+            df[column] = df[column].fillna(
+                df[column].median()
+            )
+
+    return df
+
+
+# ============================================================
+# 6. ROBUST Z-SCORE
+# ============================================================
+
+def calculate_robust_z(values, median, mad):
+    """
+    Calculate robust z-score using MAD.
+
+    Robust z-score is less affected by extreme values
+    than ordinary z-score.
+    """
+
+    if pd.isna(mad) or mad < EPSILON:
+        return 0.0
+
+    return abs(
+        0.6745 * (values - median) / mad
+    )
+
+
+# ============================================================
+# 7. NORMALIZE VALUE
+# ============================================================
+
+def minmax_series(series):
+    """Normalize a pandas Series to 0-1."""
+
+    series = pd.to_numeric(
+        series,
+        errors="coerce"
+    ).fillna(0)
+
+    minimum = series.min()
+    maximum = series.max()
+
+    if pd.isna(minimum) or pd.isna(maximum):
         return pd.Series(
-            np.zeros(len(series)),
+            0.0,
+            index=series.index
+        )
+
+    if maximum - minimum < EPSILON:
+        return pd.Series(
+            0.0,
             index=series.index
         )
 
     return (
-        0.6745 *
-        (series - median) /
-        mad
+        (series - minimum)
+        / (maximum - minimum)
+    ).clip(0, 1)
+
+
+# ============================================================
+# 8. CALCULATE GROUP STATISTICS
+# ============================================================
+def calculate_group_statistics(df):
+    """
+    Calculate component-aware peer-group statistics.
+
+    Components are grouped using:
+        component_type
+        lot_id
+        temperature_bin
+        voltage_bin
+
+    Temperature and voltage are continuous values, so they
+    are converted into operating-condition bins before grouping.
+
+    If a primary group has fewer than MIN_GROUP_SIZE components,
+    a broader group without lot_id is used.
+    """
+
+    result = df.copy()
+
+    # --------------------------------------------------------
+    # Create operating-condition bins
+    # --------------------------------------------------------
+
+    result["temperature_bin"] = (
+        np.floor(result[TEMPERATURE_COLUMN] / TEMPERATURE_BIN_SIZE)
+        * TEMPERATURE_BIN_SIZE
     )
 
+    result["voltage_bin"] = (
+        np.floor(result[VOLTAGE_COLUMN] / VOLTAGE_BIN_SIZE)
+        * VOLTAGE_BIN_SIZE
+    )
 
-def calculate_severity(row):
+    # --------------------------------------------------------
+    # Primary peer group
+    # --------------------------------------------------------
 
-    # Absolute specification failure has highest priority.
-    if row["absolute_limit_exceeded"]:
+    primary_columns = [
+        COMPONENT_TYPE_COLUMN,
+        LOT_ID_COLUMN,
+        "temperature_bin",
+        "voltage_bin"
+    ]
 
-        return "CRITICAL"
+    primary_group = result.groupby(
+        primary_columns,
+        dropna=False
+    )
 
-    evidence = row["anomaly_evidence_count"]
+    # --------------------------------------------------------
+    # Fallback peer group
+    # --------------------------------------------------------
 
-    score = row["anomaly_score"]
+    fallback_columns = [
+        COMPONENT_TYPE_COLUMN,
+        "temperature_bin",
+        "voltage_bin"
+    ]
 
-    # Strong dynamic evidence
-    if evidence >= 3 and score >= 0.75:
-        return "CRITICAL"
+    fallback_group = result.groupby(
+        fallback_columns,
+        dropna=False
+    )
 
-    if evidence >= 3:
-        return "HIGH"
+    # --------------------------------------------------------
+    # Calculate statistics
+    # --------------------------------------------------------
 
-    if evidence == 2 and score >= 0.50:
-        return "HIGH"
+    for measurement in ALL_MEASUREMENT_COLUMNS:
 
-    if evidence == 2:
-        return "MEDIUM"
+        # ====================================================
+        # PRIMARY GROUP
+        # ====================================================
 
-    if evidence == 1:
-        return "LOW"
+        primary_count = primary_group[measurement].transform("count")
+        primary_mean = primary_group[measurement].transform("mean")
+        primary_median = primary_group[measurement].transform("median")
+        primary_std = primary_group[measurement].transform("std")
+        primary_min = primary_group[measurement].transform("min")
+        primary_max = primary_group[measurement].transform("max")
 
-    return "NORMAL"
+        primary_q1 = primary_group[measurement].transform(
+            lambda x: x.quantile(0.25)
+        )
+
+        primary_q3 = primary_group[measurement].transform(
+            lambda x: x.quantile(0.75)
+        )
+
+        primary_mad = primary_group[measurement].transform(
+            lambda x: np.median(
+                np.abs(x - np.median(x))
+            )
+        )
+
+        # ====================================================
+        # FALLBACK GROUP
+        # ====================================================
+
+        fallback_count = fallback_group[measurement].transform("count")
+        fallback_mean = fallback_group[measurement].transform("mean")
+        fallback_median = fallback_group[measurement].transform("median")
+        fallback_std = fallback_group[measurement].transform("std")
+        fallback_min = fallback_group[measurement].transform("min")
+        fallback_max = fallback_group[measurement].transform("max")
+
+        fallback_q1 = fallback_group[measurement].transform(
+            lambda x: x.quantile(0.25)
+        )
+
+        fallback_q3 = fallback_group[measurement].transform(
+            lambda x: x.quantile(0.75)
+        )
+
+        fallback_mad = fallback_group[measurement].transform(
+            lambda x: np.median(
+                np.abs(x - np.median(x))
+            )
+        )
+
+        # ====================================================
+        # SELECT PRIMARY OR FALLBACK
+        # ====================================================
+
+        use_primary = primary_count >= MIN_GROUP_SIZE
+
+        result[
+            f"{measurement}_group_count"
+        ] = np.where(
+            use_primary,
+            primary_count,
+            fallback_count
+        )
+
+        result[
+            f"{measurement}_group_mean"
+        ] = np.where(
+            use_primary,
+            primary_mean,
+            fallback_mean
+        )
+
+        result[
+            f"{measurement}_group_median"
+        ] = np.where(
+            use_primary,
+            primary_median,
+            fallback_median
+        )
+
+        result[
+            f"{measurement}_group_std"
+        ] = np.where(
+            use_primary,
+            primary_std,
+            fallback_std
+        )
+
+        result[
+            f"{measurement}_group_min"
+        ] = np.where(
+            use_primary,
+            primary_min,
+            fallback_min
+        )
+
+        result[
+            f"{measurement}_group_max"
+        ] = np.where(
+            use_primary,
+            primary_max,
+            fallback_max
+        )
+
+        result[
+            f"{measurement}_group_q1"
+        ] = np.where(
+            use_primary,
+            primary_q1,
+            fallback_q1
+        )
+
+        result[
+            f"{measurement}_group_q3"
+        ] = np.where(
+            use_primary,
+            primary_q3,
+            fallback_q3
+        )
+
+        result[
+            f"{measurement}_group_iqr"
+        ] = (
+            result[f"{measurement}_group_q3"]
+            -
+            result[f"{measurement}_group_q1"]
+        )
+
+        result[
+            f"{measurement}_group_mad"
+        ] = np.where(
+            use_primary,
+            primary_mad,
+            fallback_mad
+        )
+
+    return result
 
 
-def generate_explanation(row):
+# ============================================================
+# 9. STATISTICAL ANOMALY FEATURES
+# ============================================================
+def calculate_statistical_features(df):
+    """
+    Calculate statistical and temporal anomaly evidence.
+
+    Statistical evidence:
+        - deviation from peer-group median
+        - robust z-score
+        - IQR anomaly
+
+    Temporal evidence:
+        - 0h -> 24h change
+        - 24h -> 96h change
+        - 96h -> 168h change
+
+    Temporal changes are compared with the corresponding
+    changes of components in the same peer group.
+    """
+
+    result = df.copy()
+
+    robust_z_columns = []
+    iqr_flag_columns = []
+
+    # ========================================================
+    # 1. EXISTING PEER-GROUP STATISTICAL EVIDENCE
+    # ========================================================
+
+    for measurement in ALL_MEASUREMENT_COLUMNS:
+
+        median_column = f"{measurement}_group_median"
+        mad_column = f"{measurement}_group_mad"
+        q1_column = f"{measurement}_group_q1"
+        q3_column = f"{measurement}_group_q3"
+        iqr_column = f"{measurement}_group_iqr"
+
+        # ----------------------------------------------------
+        # Deviation from peer-group median
+        # ----------------------------------------------------
+
+        deviation_column = f"{measurement}_deviation"
+
+        result[deviation_column] = abs(
+            result[measurement] - result[median_column]
+        )
+
+        # ----------------------------------------------------
+        # Robust Z-score
+        # ----------------------------------------------------
+
+        robust_z_column = f"{measurement}_robust_z"
+
+        mad = result[mad_column]
+        deviation = result[deviation_column]
+
+        result[robust_z_column] = 0.0
+
+        valid_mad = mad >= EPSILON
+
+        result.loc[valid_mad, robust_z_column] = (
+            0.6745
+            * deviation[valid_mad]
+            / mad[valid_mad]
+        )
+
+        zero_mad = ~valid_mad
+
+        result.loc[
+            zero_mad & (deviation > EPSILON),
+            robust_z_column
+        ] = 3.0
+
+        result[robust_z_column] = (
+            result[robust_z_column]
+            .replace([np.inf, -np.inf], 0)
+            .fillna(0)
+        )
+
+        robust_z_columns.append(robust_z_column)
+
+        # ----------------------------------------------------
+        # IQR anomaly
+        # ----------------------------------------------------
+
+        lower_bound = (
+            result[q1_column]
+            - 1.5 * result[iqr_column]
+        )
+
+        upper_bound = (
+            result[q3_column]
+            + 1.5 * result[iqr_column]
+        )
+
+        iqr_flag_column = f"{measurement}_iqr_anomaly"
+
+        result[iqr_flag_column] = (
+            (result[measurement] < lower_bound)
+            |
+            (result[measurement] > upper_bound)
+        ).astype(int)
+
+        iqr_flag_columns.append(iqr_flag_column)
+
+    # ========================================================
+    # 2. EXISTING STATISTICAL SCORE
+    # ========================================================
+
+    result["max_robust_z"] = result[
+        robust_z_columns
+    ].max(axis=1)
+
+    result["statistical_evidence_count"] = result[
+        iqr_flag_columns
+    ].sum(axis=1)
+
+    robust_component = (
+        (result["max_robust_z"] - 2.0)
+        / 4.0
+    ).clip(0, 1)
+
+    iqr_component = (
+        result["statistical_evidence_count"]
+        / max(len(ALL_MEASUREMENT_COLUMNS), 1)
+    ).clip(0, 1)
+
+    statistical_score = (
+        0.70 * robust_component
+        +
+        0.30 * iqr_component
+    ).clip(0, 1)
+
+    # ========================================================
+    # 3. TEMPORAL CHANGE FEATURES
+    # ========================================================
+
+    temporal_robust_z_columns = []
+
+    measurement_pairs = [
+        (
+            "iddq",
+            IDDQ_COLUMNS
+        ),
+        (
+            "leakage",
+            LEAKAGE_COLUMNS
+        )
+    ]
+
+    for measurement_name, columns in measurement_pairs:
+
+        for i in range(len(columns) - 1):
+
+            current_column = columns[i]
+            next_column = columns[i + 1]
+
+            change_name = (
+                f"{measurement_name}_change_"
+                f"{current_column.split('_')[1]}_"
+                f"{next_column.split('_')[1]}"
+            )
+
+            # ------------------------------------------------
+            # Calculate change
+            # ------------------------------------------------
+
+            result[change_name] = (
+                result[next_column]
+                - result[current_column]
+            )
+
+            # ------------------------------------------------
+            # Create change column for every peer component
+            # ------------------------------------------------
+
+            change_group = result.groupby(
+                [
+                    COMPONENT_TYPE_COLUMN,
+                    LOT_ID_COLUMN,
+                    "temperature_bin",
+                    "voltage_bin"
+                ],
+                dropna=False
+            )[change_name]
+
+            change_median = change_group.transform("median")
+
+            change_mad = change_group.transform(
+                lambda x: np.median(
+                    np.abs(x - np.median(x))
+                )
+            )
+
+            # ------------------------------------------------
+            # Robust Z-score for temporal change
+            # ------------------------------------------------
+
+            temporal_z_name = (
+                f"{change_name}_robust_z"
+            )
+
+            temporal_deviation = abs(
+                result[change_name]
+                - change_median
+            )
+
+            result[temporal_z_name] = 0.0
+
+            valid_change_mad = (
+                change_mad >= EPSILON
+            )
+
+            result.loc[
+                valid_change_mad,
+                temporal_z_name
+            ] = (
+                0.6745
+                * temporal_deviation[valid_change_mad]
+                / change_mad[valid_change_mad]
+            )
+
+            zero_change_mad = ~valid_change_mad
+
+            result.loc[
+                zero_change_mad
+                & (temporal_deviation > EPSILON),
+                temporal_z_name
+            ] = 3.0
+
+            result[temporal_z_name] = (
+                result[temporal_z_name]
+                .replace([np.inf, -np.inf], 0)
+                .fillna(0)
+            )
+
+            temporal_robust_z_columns.append(
+                temporal_z_name
+            )
+
+    # ========================================================
+    # 4. TEMPORAL ANOMALY SCORE
+    # ========================================================
+
+    result["max_temporal_robust_z"] = result[
+        temporal_robust_z_columns
+    ].max(axis=1)
+
+    result["temporal_anomaly_score"] = (
+        (
+            result["max_temporal_robust_z"] - 2.0
+        )
+        / 4.0
+    ).clip(0, 1)
+
+    result["temporal_anomaly_flag"] = (
+        result["temporal_anomaly_score"] >= 0.50
+    ).astype(int)
+
+    # ========================================================
+    # 5. COMBINE STATISTICAL + TEMPORAL EVIDENCE
+    # ========================================================
+
+    result["statistical_score"] = (
+        0.70 * statistical_score
+        +
+        0.30 * result["temporal_anomaly_score"]
+    ).clip(0, 1)
+
+    result["statistical_anomaly_flag"] = (
+        result["statistical_score"] >= 0.50
+    ).astype(int)
+
+    return result
+# ============================================================
+# 10. CREATE ISOLATION FOREST FEATURES
+# ============================================================
+
+def create_isolation_forest_features(df):
+    """
+    Create numeric features for Isolation Forest.
+
+    Ground truth is deliberately excluded.
+    """
+
+    features = pd.DataFrame(
+        index=df.index
+    )
+
+    # --------------------------------------------------------
+    # Raw measurements
+    # --------------------------------------------------------
+
+    for column in ALL_MEASUREMENT_COLUMNS:
+        features[column] = df[column]
+
+    # --------------------------------------------------------
+    # Group-relative features
+    # --------------------------------------------------------
+
+    for measurement in ALL_MEASUREMENT_COLUMNS:
+
+        features[
+            f"{measurement}_robust_z"
+        ] = df[
+            f"{measurement}_robust_z"
+        ]
+
+    # --------------------------------------------------------
+    # Environmental conditions
+    # --------------------------------------------------------
+
+    features[TEMPERATURE_COLUMN] = (
+        df[TEMPERATURE_COLUMN]
+    )
+
+    features[VOLTAGE_COLUMN] = (
+        df[VOLTAGE_COLUMN]
+    )
+
+    # --------------------------------------------------------
+    # Drift features for Iddq
+    # --------------------------------------------------------
+
+    if len(IDDQ_COLUMNS) >= 2:
+
+        for i in range(
+            len(IDDQ_COLUMNS) - 1
+        ):
+
+            first = IDDQ_COLUMNS[i]
+            second = IDDQ_COLUMNS[i + 1]
+
+            feature_name = (
+                f"drift_{first}_to_{second}"
+            )
+
+            features[feature_name] = (
+                df[second]
+                - df[first]
+            )
+
+    # --------------------------------------------------------
+    # Drift features for leakage
+    # --------------------------------------------------------
+
+    if len(LEAKAGE_COLUMNS) >= 2:
+
+        for i in range(
+            len(LEAKAGE_COLUMNS) - 1
+        ):
+
+            first = LEAKAGE_COLUMNS[i]
+            second = LEAKAGE_COLUMNS[i + 1]
+
+            feature_name = (
+                f"drift_{first}_to_{second}"
+            )
+
+            features[feature_name] = (
+                df[second]
+                - df[first]
+            )
+
+    # Clean values
+    features = features.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+    features = features.fillna(
+        features.median(numeric_only=True)
+    )
+
+    features = features.fillna(0)
+
+    return features
+
+
+# ============================================================
+# 11. ISOLATION FOREST
+# ============================================================
+
+def calculate_isolation_forest(df):
+    """
+    Run Isolation Forest on the cumulative dataset.
+
+    sklearn IsolationForest does not provide partial_fit,
+    so a fresh model is fitted for every cumulative stage.
+    """
+
+    result = df.copy()
+
+    features = create_isolation_forest_features(
+        result
+    )
+
+    model = IsolationForest(
+        n_estimators=IF_CONFIG["n_estimators"],
+        contamination=IF_CONFIG["contamination"],
+        random_state=IF_CONFIG["random_state"],
+        n_jobs=IF_CONFIG["n_jobs"]
+    )
+
+    model.fit(features)
+
+    # sklearn:
+    # -1 = anomaly
+    # +1 = normal
+
+    predictions = model.predict(features)
+
+    raw_scores = -model.score_samples(features)
+
+    # Normalize to 0-1
+    minimum = raw_scores.min()
+    maximum = raw_scores.max()
+
+    if maximum - minimum < EPSILON:
+
+        normalized_scores = np.zeros(
+            len(raw_scores)
+        )
+
+    else:
+
+        normalized_scores = (
+            (raw_scores - minimum)
+            / (maximum - minimum)
+        )
+
+    result["isolation_forest_score"] = (
+        normalized_scores.clip(0, 1)
+    )
+
+    result["isolation_forest_flag"] = (
+        predictions == -1
+    ).astype(int)
+
+    return result
+
+
+# ============================================================
+# 12. COMBINED ANOMALY SCORE
+# ============================================================
+
+def calculate_combined_anomaly_score(df):
+    """
+    Combine:
+
+        Statistical anomaly score
+        +
+        Isolation Forest score
+
+    according to config.yaml.
+    """
+
+    result = df.copy()
+
+    result["combined_anomaly_score"] = (
+        STAT_WEIGHT
+        * result["statistical_score"]
+        +
+        IF_WEIGHT
+        * result["isolation_forest_score"]
+    ).clip(0, 1)
+
+    # Combined anomaly flag
+    result["anomaly_flag"] = (
+        result["combined_anomaly_score"]
+        >= ANOMALY_THRESHOLD
+    ).astype(int)
+
+    return result
+
+
+# ============================================================
+# 13. SPECIFICATION VIOLATION
+# ============================================================
+
+def calculate_specification_violation(df):
+    """
+    Check the final Iddq value against the absolute limit.
+
+    This is separate from statistical anomaly detection.
+
+    A component can therefore be:
+
+        statistically abnormal but below limit
+
+    OR
+
+        within group statistics but above specification.
+    """
+
+    result = df.copy()
+
+    final_iddq = IDDQ_COLUMNS[-1]
+
+    result["limit_violation"] = (
+        result[final_iddq]
+        > result[ABSOLUTE_LIMIT_COLUMN]
+    ).astype(int)
+
+    result["limit_excess_uA"] = (
+        result[final_iddq]
+        - result[ABSOLUTE_LIMIT_COLUMN]
+    )
+
+    result["limit_excess_uA"] = (
+        result["limit_excess_uA"]
+        .clip(lower=0)
+    )
+
+    return result
+
+
+# ============================================================
+# 14. RISK SCORE
+# ============================================================
+
+def calculate_risk_score(df):
+    """
+    Calculate final risk score.
+
+    Risk combines:
+
+        1. Combined anomaly score
+        2. Specification violation
+        3. Statistical evidence
+
+    The anomaly component itself already combines
+    statistical detection + Isolation Forest.
+    """
+
+    result = df.copy()
+
+    anomaly_component = (
+        result["combined_anomaly_score"]
+    )
+
+    specification_component = (
+        result["limit_violation"]
+    )
+
+    statistical_component = (
+        result["statistical_score"]
+    )
+
+    result["risk_score"] = (
+        0.65 * anomaly_component
+        +
+        0.25 * specification_component
+        +
+        0.10 * statistical_component
+    )
+
+    result["risk_score"] = (
+        result["risk_score"]
+        .clip(0, 1)
+    )
+
+    # Convert to 0-100
+    result["risk_score_100"] = (
+        result["risk_score"] * 100
+    ).round(2)
+
+    # --------------------------------------------------------
+    # Risk level
+    # --------------------------------------------------------
+
+    result["risk_level"] = np.select(
+        [
+            result["risk_score"] >= 0.80,
+            result["risk_score"] >= 0.60,
+            result["risk_score"] >= 0.30
+        ],
+        [
+            "CRITICAL",
+            "HIGH",
+            "MEDIUM"
+        ],
+        default="LOW"
+    )
+
+    return result
+
+
+# ============================================================
+# 15. SCREENING DECISION
+# ============================================================
+
+def calculate_screening(df):
+    """
+    Screening:
+
+        PASS   -> Within specification and low risk
+        REVIEW -> Within specification but elevated risk
+        REJECT -> Specification limit violation
+    """
+
+    result = df.copy()
+
+    result["screening_decision"] = np.select(
+        [
+            result["limit_violation"] == 1,
+            result["risk_score"] >= PASS_THRESHOLD
+        ],
+        [
+            "REJECT",
+            "REVIEW"
+        ],
+        default="PASS"
+    )
+
+    return result
+
+# ============================================================
+# 16. EVIDENCE-BASED EXPLANATION
+# ============================================================
+
+def create_explanation(row):
+    """
+    Generate a human-readable explanation based on
+    actual evidence for that component.
+    """
 
     reasons = []
 
     # --------------------------------------------------------
-    # Static limit
+    # Specification
     # --------------------------------------------------------
 
-    if row["absolute_limit_exceeded"]:
+    if row["limit_violation"] == 1:
 
         reasons.append(
-            "168h Iddq exceeded the absolute specification limit"
+            "final Iddq exceeds the absolute specification limit"
         )
 
     # --------------------------------------------------------
-    # Timepoint statistical anomalies
+    # Statistical evidence
     # --------------------------------------------------------
 
-    abnormal_timepoints = []
-
-    for timepoint in ["0h", "24h", "96h", "168h"]:
-
-        column = f"z_anomaly_{timepoint}"
-
-        if column in row.index and row[column]:
-
-            abnormal_timepoints.append(timepoint)
-
-    if abnormal_timepoints:
+    if row["statistical_score"] >= 0.50:
 
         reasons.append(
-            "Lot-level statistical anomaly at "
-            + ", ".join(abnormal_timepoints)
-        )
-
-    # --------------------------------------------------------
-    # IQR anomalies
-    # --------------------------------------------------------
-
-    iqr_timepoints = []
-
-    for timepoint in ["0h", "24h", "96h", "168h"]:
-
-        column = f"iqr_anomaly_{timepoint}"
-
-        if column in row.index and row[column]:
-
-            iqr_timepoints.append(timepoint)
-
-    if iqr_timepoints:
-
-        reasons.append(
-            "Value outside lot IQR range at "
-            + ", ".join(iqr_timepoints)
-        )
-
-    # --------------------------------------------------------
-    # Drift anomaly
-    # --------------------------------------------------------
-
-    if row["drift_anomaly"]:
-
-        reasons.append(
-            "Unusually high positive burn-in drift"
+            "measurement is statistically abnormal "
+            "within its component/lot/condition group"
         )
 
     # --------------------------------------------------------
     # Isolation Forest
     # --------------------------------------------------------
 
-    if row["isolation_anomaly"]:
+    if row["isolation_forest_flag"] == 1:
 
         reasons.append(
-            "Isolation Forest detected unusual multi-feature behavior"
+            "Isolation Forest identified an unusual "
+            "multivariate pattern"
         )
 
     # --------------------------------------------------------
-    # Latent-risk explanation
+    # Strong combined evidence
     # --------------------------------------------------------
 
     if (
-        row["dynamic_anomaly"]
+        row["statistical_score"] >= 0.50
         and
-        not row["absolute_limit_exceeded"]
+        row["isolation_forest_flag"] == 1
     ):
 
         reasons.append(
-            "Dynamic anomaly detected while remaining below "
-            "the absolute specification limit"
+            "statistical and machine-learning evidence agree"
         )
 
     # --------------------------------------------------------
-    # Normal
+    # No evidence
     # --------------------------------------------------------
 
     if not reasons:
 
         return (
-            "No significant abnormal behavior detected "
-            "relative to the lot baseline."
+            "No strong anomaly evidence detected; "
+            "component follows its group pattern."
         )
 
-    return "; ".join(reasons)
+    return "; ".join(reasons) + "."
 
 
-# ============================================================
-# STEP 1: LOAD DATASET
-# ============================================================
+def generate_explanations(df):
+    """Generate explanation for every component."""
 
-print("=" * 75)
-print("SIH 26170")
-print("MODULE A: DYNAMIC ANOMALY DETECTION")
-print("=" * 75)
+    result = df.copy()
 
-print("\nLoading dataset...")
-
-if not os.path.exists(FILE_PATH):
-
-    raise FileNotFoundError(
-        f"Dataset not found: {FILE_PATH}"
-    )
-
-df = pd.read_csv(FILE_PATH)
-
-print("\nDataset loaded successfully.")
-
-print(
-    f"Number of components: {len(df)}"
-)
-
-print(
-    f"Number of columns: {len(df.columns)}"
-)
-
-
-# ============================================================
-# STEP 2: REQUIRED COLUMN VALIDATION
-# ============================================================
-
-print("\n" + "=" * 75)
-print("COLUMN VALIDATION")
-print("=" * 75)
-
-required_columns = [
-    "component_id",
-    "lot_id",
-    "absolute_limit_uA",
-    "ground_truth"
-] + MEASUREMENT_FEATURES
-
-missing_columns = [
-    column
-    for column in required_columns
-    if column not in df.columns
-]
-
-if missing_columns:
-
-    raise ValueError(
-        "Missing required columns:\n"
-        + "\n".join(missing_columns)
-    )
-
-print("\nAll required columns are present.")
-
-
-# ============================================================
-# STEP 3: BASIC DATA VALIDATION
-# ============================================================
-
-print("\n" + "=" * 75)
-print("DATA VALIDATION")
-print("=" * 75)
-
-print("\nMissing measurement values:")
-
-missing_values = (
-    df[MEASUREMENT_FEATURES]
-    .isnull()
-    .sum()
-)
-
-print(missing_values)
-
-print("\nDuplicate component IDs:")
-
-duplicate_count = (
-    df["component_id"]
-    .duplicated()
-    .sum()
-)
-
-print(duplicate_count)
-
-print("\nNumber of lots:")
-
-print(
-    df["lot_id"].nunique()
-)
-
-print("\nMeasurement features:")
-
-for timepoint, column in TIMEPOINTS.items():
-
-    print(
-        f" - {timepoint}: {column}"
-    )
-
-
-# ============================================================
-# STEP 4: DATA CLEANING FOR NUMERIC FEATURES
-# ============================================================
-
-for column in MEASUREMENT_FEATURES:
-
-    df[column] = pd.to_numeric(
-        df[column],
-        errors="coerce"
-    )
-
-df["absolute_limit_uA"] = pd.to_numeric(
-    df["absolute_limit_uA"],
-    errors="coerce"
-)
-
-print("\nNumeric validation completed.")
-
-
-# ============================================================
-# STEP 5: LOT-LEVEL ROBUST BASELINES
-# ============================================================
-#
-# Instead of relying only on mean/std, we calculate:
-#
-# median
-# MAD
-# Q1
-# Q3
-# IQR
-#
-# separately for every lot and every time point.
-#
-# This makes the baseline less sensitive to extreme values.
-# ============================================================
-
-print("\n" + "=" * 75)
-print("LOT-LEVEL BASELINE CALCULATION")
-print("=" * 75)
-
-for timepoint, column in TIMEPOINTS.items():
-
-    prefix = timepoint.replace("h", "")
-
-    # --------------------------------------------------------
-    # Median
-    # --------------------------------------------------------
-
-    df[f"lot_median_{timepoint}"] = (
-        df.groupby("lot_id")[column]
-        .transform("median")
-    )
-
-    # --------------------------------------------------------
-    # Mean
-    # --------------------------------------------------------
-
-    df[f"lot_mean_{timepoint}"] = (
-        df.groupby("lot_id")[column]
-        .transform("mean")
-    )
-
-    # --------------------------------------------------------
-    # Standard deviation
-    # --------------------------------------------------------
-
-    df[f"lot_std_{timepoint}"] = (
-        df.groupby("lot_id")[column]
-        .transform("std")
-    )
-
-    # --------------------------------------------------------
-    # Q1
-    # --------------------------------------------------------
-
-    df[f"Q1_{timepoint}"] = (
-        df.groupby("lot_id")[column]
-        .transform(
-            "quantile",
-            0.25
+    result["explanation"] = (
+        result.apply(
+            create_explanation,
+            axis=1
         )
     )
 
-    # --------------------------------------------------------
-    # Q3
-    # --------------------------------------------------------
+    return result
 
-    df[f"Q3_{timepoint}"] = (
-        df.groupby("lot_id")[column]
-        .transform(
-            "quantile",
-            0.75
-        )
+
+# ============================================================
+# 17. GROUND-TRUTH NORMALIZATION
+# ============================================================
+
+def convert_ground_truth_to_binary(series):
+    """
+    Convert ground truth values into:
+
+        1 = defective/anomalous
+        0 = normal
+
+    Handles common textual labels.
+    """
+
+    values = (
+        series
+        .astype(str)
+        .str.strip()
+        .str.lower()
     )
 
-    # --------------------------------------------------------
-    # IQR
-    # --------------------------------------------------------
+    normal_values = {
+        "normal",
+        "good",
+        "pass",
+        "healthy",
+        "0",
+        "false"
+    }
 
-    df[f"IQR_{timepoint}"] = (
-        df[f"Q3_{timepoint}"]
-        -
-        df[f"Q1_{timepoint}"]
+    return (
+        ~values.isin(normal_values)
+    ).astype(int)
+
+
+# ============================================================
+# 18. GROUND-TRUTH EVALUATION
+# ============================================================
+
+def evaluate_ground_truth(df):
+    """
+    Evaluate Module A against ground truth.
+
+    IMPORTANT:
+    Ground truth is NOT used for anomaly detection.
+    It is only used here for evaluation.
+    """
+
+    y_true = convert_ground_truth_to_binary(
+        df[GROUND_TRUTH_COLUMN]
     )
 
-    # --------------------------------------------------------
-    # IQR limits
-    # --------------------------------------------------------
+    y_pred = (
+        df["screening_decision"]
+        != "PASS"
+    ).astype(int)
 
-    df[f"iqr_lower_{timepoint}"] = (
-        df[f"Q1_{timepoint}"]
-        -
-        IQR_MULTIPLIER *
-        df[f"IQR_{timepoint}"]
+    accuracy = accuracy_score(
+        y_true,
+        y_pred
     )
 
-    df[f"iqr_upper_{timepoint}"] = (
-        df[f"Q3_{timepoint}"]
-        +
-        IQR_MULTIPLIER *
-        df[f"IQR_{timepoint}"]
-    )
-
-
-print("\nRobust lot baselines created.")
-
-
-# ============================================================
-# STEP 6: MULTI-TIMEPOINT Z-SCORE DETECTION
-# ============================================================
-#
-# Detect abnormal values at:
-#
-# 0h
-# 24h
-# 96h
-# 168h
-#
-# The component is compared with its own manufacturing lot.
-# ============================================================
-
-print("\n" + "=" * 75)
-print("MULTI-TIMEPOINT STATISTICAL ANOMALY DETECTION")
-print("=" * 75)
-
-for timepoint, column in TIMEPOINTS.items():
-
-    # --------------------------------------------------------
-    # Traditional Z-score
-    # --------------------------------------------------------
-
-    df[f"zscore_{timepoint}"] = (
-        df[column] -
-        df[f"lot_mean_{timepoint}"]
-    ) / df[
-        f"lot_std_{timepoint}"
-    ].replace(
-        0,
-        np.nan
-    )
-
-    df[f"zscore_{timepoint}"] = (
-        df[f"zscore_{timepoint}"]
-        .replace(
-            [np.inf, -np.inf],
-            np.nan
-        )
-        .fillna(0)
-    )
-
-    # --------------------------------------------------------
-    # Robust Z-score
-    # --------------------------------------------------------
-
-    robust_scores = (
-        df.groupby("lot_id")[column]
-        .transform(
-            robust_zscore
-        )
-    )
-
-    df[f"robust_zscore_{timepoint}"] = (
-        robust_scores
-    )
-
-    # --------------------------------------------------------
-    # Traditional Z-score anomaly
-    # --------------------------------------------------------
-
-    df[f"z_anomaly_{timepoint}"] = (
-        df[f"zscore_{timepoint}"]
-        .abs()
-        >
-        Z_THRESHOLD
-    )
-
-    # --------------------------------------------------------
-    # Robust Z-score anomaly
-    # --------------------------------------------------------
-
-    df[f"robust_z_anomaly_{timepoint}"] = (
-        df[f"robust_zscore_{timepoint}"]
-        .abs()
-        >
-        Z_THRESHOLD
-    )
-
-    # --------------------------------------------------------
-    # IQR anomaly
-    # --------------------------------------------------------
-
-    df[f"iqr_anomaly_{timepoint}"] = (
-        (
-            df[column]
-            <
-            df[f"iqr_lower_{timepoint}"]
-        )
-        |
-        (
-            df[column]
-            >
-            df[f"iqr_upper_{timepoint}"]
-        )
-    )
-
-    print(
-        f"\n{timepoint}:"
-    )
-
-    print(
-        "  Z-score anomalies:",
-        int(
-            df[f"z_anomaly_{timepoint}"]
-            .sum()
-        )
-    )
-
-    print(
-        "  Robust Z-score anomalies:",
-        int(
-            df[f"robust_z_anomaly_{timepoint}"]
-            .sum()
-        )
-    )
-
-    print(
-        "  IQR anomalies:",
-        int(
-            df[f"iqr_anomaly_{timepoint}"]
-            .sum()
-        )
-    )
-
-
-# ============================================================
-# STEP 7: MULTI-TIMEPOINT STATISTICAL EVIDENCE
-# ============================================================
-#
-# For each time point we combine:
-#
-# Robust Z-score
-# OR
-# IQR
-#
-# This gives statistical evidence that a measurement is unusual.
-# ============================================================
-
-for timepoint in TIMEPOINTS:
-
-    df[f"statistical_anomaly_{timepoint}"] = (
-        df[f"robust_z_anomaly_{timepoint}"]
-        |
-        df[f"iqr_anomaly_{timepoint}"]
-    )
-
-
-# Count abnormal time points
-
-df["abnormal_timepoint_count"] = sum(
-    df[
-        f"statistical_anomaly_{timepoint}"
-    ].astype(int)
-    for timepoint in TIMEPOINTS
-)
-
-df["statistical_anomaly"] = (
-    df["abnormal_timepoint_count"] >= 1
-)
-
-print("\nStatistical anomaly calculation completed.")
-
-
-# ============================================================
-# STEP 8: TIME-SERIES DRIFT FEATURES
-# ============================================================
-
-print("\n" + "=" * 75)
-print("TIME-SERIES DRIFT ANALYSIS")
-print("=" * 75)
-
-# ------------------------------------------------------------
-# Interval drift rates
-# ------------------------------------------------------------
-
-df["drift_0_24"] = (
-    df["iddq_24h_uA"]
-    -
-    df["iddq_0h_uA"]
-) / 24
-
-df["drift_24_96"] = (
-    df["iddq_96h_uA"]
-    -
-    df["iddq_24h_uA"]
-) / 72
-
-df["drift_96_168"] = (
-    df["iddq_168h_uA"]
-    -
-    df["iddq_96h_uA"]
-) / 72
-
-# ------------------------------------------------------------
-# Overall drift rate
-# ------------------------------------------------------------
-
-df["overall_drift"] = (
-    df["iddq_168h_uA"]
-    -
-    df["iddq_0h_uA"]
-) / 168
-
-
-# ============================================================
-# STEP 9: LOT-LEVEL DRIFT BASELINE
-# ============================================================
-
-df["drift_mean"] = (
-    df.groupby("lot_id")["overall_drift"]
-    .transform("mean")
-)
-
-df["drift_median"] = (
-    df.groupby("lot_id")["overall_drift"]
-    .transform("median")
-)
-
-df["drift_std"] = (
-    df.groupby("lot_id")["overall_drift"]
-    .transform("std")
-)
-
-
-# ============================================================
-# STEP 10: DRIFT Z-SCORE
-# ============================================================
-
-df["drift_zscore"] = (
-    df["overall_drift"]
-    -
-    df["drift_mean"]
-) / df[
-    "drift_std"
-].replace(
-    0,
-    np.nan
-)
-
-df["drift_zscore"] = (
-    df["drift_zscore"]
-    .replace(
-        [np.inf, -np.inf],
-        np.nan
-    )
-    .fillna(0)
-)
-
-
-# ------------------------------------------------------------
-# Robust drift Z-score
-# ------------------------------------------------------------
-
-df["robust_drift_zscore"] = (
-    df.groupby("lot_id")["overall_drift"]
-    .transform(
-        robust_zscore
-    )
-)
-
-
-# ------------------------------------------------------------
-# Positive drift anomaly
-#
-# We are particularly interested in components whose
-# electrical parameter increases abnormally during burn-in.
-# ------------------------------------------------------------
-
-df["drift_anomaly"] = (
-    df["robust_drift_zscore"]
-    >
-    DRIFT_Z_THRESHOLD
-)
-
-
-print(
-    "\nHigh-drift components:",
-    int(
-        df["drift_anomaly"].sum()
-    )
-)
-
-
-# ============================================================
-# STEP 11: ISOLATION FOREST
-# ============================================================
-#
-# Module A has access to the complete burn-in history.
-#
-# Therefore Isolation Forest can use:
-#
-# 0h
-# 24h
-# 96h
-# 168h
-# interval drift
-# overall drift
-#
-# This is NOT the same as Module B.
-#
-# Module B will use early measurements to predict 168h.
-# ============================================================
-
-print("\n" + "=" * 75)
-print("ISOLATION FOREST")
-print("=" * 75)
-
-
-isolation_features = [
-    "iddq_0h_uA",
-    "iddq_24h_uA",
-    "iddq_96h_uA",
-    "iddq_168h_uA",
-    "drift_0_24",
-    "drift_24_96",
-    "drift_96_168",
-    "overall_drift"
-]
-
-X = df[isolation_features].copy()
-
-X = X.replace(
-    [np.inf, -np.inf],
-    np.nan
-)
-
-X = X.fillna(
-    X.median()
-)
-
-
-model = IsolationForest(
-    n_estimators=ISOLATION_N_ESTIMATORS,
-    contamination=ISOLATION_CONTAMINATION,
-    random_state=RANDOM_STATE,
-    n_jobs=-1
-)
-
-model.fit(X)
-
-
-# ============================================================
-# STEP 12: ISOLATION FOREST PREDICTION
-# ============================================================
-
-df["isolation_prediction"] = (
-    model.predict(X)
-)
-
-df["isolation_anomaly"] = (
-    df["isolation_prediction"]
-    ==
-    -1
-)
-
-print(
-    "Isolation Forest anomalies:",
-    int(
-        df["isolation_anomaly"].sum()
-    )
-)
-
-
-# ============================================================
-# STEP 13: ISOLATION FOREST ANOMALY SCORE
-# ============================================================
-
-df["raw_anomaly_score"] = (
-    -model.decision_function(X)
-)
-
-score_min = (
-    df["raw_anomaly_score"]
-    .min()
-)
-
-score_max = (
-    df["raw_anomaly_score"]
-    .max()
-)
-
-if score_max > score_min:
-
-    df["anomaly_score"] = (
-        (
-            df["raw_anomaly_score"]
-            -
-            score_min
-        )
-        /
-        (
-            score_max
-            -
-            score_min
-        )
-    )
-
-else:
-
-    df["anomaly_score"] = 0.0
-
-
-print("\nAnomaly score generated.")
-
-print(
-    df["anomaly_score"]
-    .describe()
-)
-
-
-# ============================================================
-# STEP 14: STATIC SPECIFICATION CHECK
-# ============================================================
-#
-# Static screening:
-#
-# Is the measured 168h value above the absolute limit?
-#
-# This represents traditional pass/fail screening.
-# ============================================================
-
-df["absolute_limit_exceeded"] = (
-    df["iddq_168h_uA"]
-    >
-    df["absolute_limit_uA"]
-)
-
-print("\n" + "=" * 75)
-print("STATIC SPECIFICATION CHECK")
-print("=" * 75)
-
-print(
-    "\nComponents exceeding absolute limit:",
-    int(
-        df["absolute_limit_exceeded"].sum()
-    )
-)
-
-
-# ============================================================
-# STEP 15: DYNAMIC EVIDENCE FUSION
-# ============================================================
-#
-# IMPORTANT:
-#
-# We don't simply use:
-#
-#     A OR B OR C
-#
-# because that can generate excessive false positives.
-#
-# Instead we count independent evidence sources.
-#
-# Evidence:
-#
-# 1. Multi-timepoint statistical anomaly
-# 2. Abnormal burn-in drift
-# 3. Isolation Forest anomaly
-#
-# The final decision requires at least TWO independent
-# dynamic signals.
-#
-# However, a component with an extreme statistical anomaly
-# at multiple time points can still be flagged.
-# ============================================================
-
-df["statistical_evidence"] = (
-    df["statistical_anomaly"]
-    .astype(int)
-)
-
-df["drift_evidence"] = (
-    df["drift_anomaly"]
-    .astype(int)
-)
-
-df["isolation_evidence"] = (
-    df["isolation_anomaly"]
-    .astype(int)
-)
-
-
-df["anomaly_evidence_count"] = (
-    df["statistical_evidence"]
-    +
-    df["drift_evidence"]
-    +
-    df["isolation_evidence"]
-)
-
-
-# ------------------------------------------------------------
-# Strong repeated statistical anomaly
-# ------------------------------------------------------------
-
-df["repeated_statistical_anomaly"] = (
-    df["abnormal_timepoint_count"]
-    >=
-    2
-)
-
-
-# ------------------------------------------------------------
-# Dynamic anomaly decision
-# ------------------------------------------------------------
-#
-# Rule 1:
-# At least two independent evidence sources.
-#
-# OR
-#
-# Rule 2:
-# Strong repeated statistical abnormality across
-# multiple burn-in checkpoints.
-#
-# This keeps the system sensitive to evolving defects
-# while reducing one-signal false positives.
-# ------------------------------------------------------------
-
-df["dynamic_anomaly"] = (
-    (
-        df["anomaly_evidence_count"]
-        >=
-        2
-    )
-    |
-    (
-        df["repeated_statistical_anomaly"]
-        &
-        (
-            df["anomaly_score"]
-            >=
-            0.50
-        )
-    )
-)
-
-
-# ============================================================
-# STEP 16: FINAL CLASSIFICATION
-# ============================================================
-
-df["combined_anomaly"] = (
-    df["dynamic_anomaly"]
-)
-
-
-# ============================================================
-# STEP 17: LATENT-RISK FLAG
-# ============================================================
-#
-# A particularly important case:
-#
-#       dynamic anomaly = TRUE
-#
-#       BUT
-#
-#       absolute specification limit = NOT exceeded
-#
-# This represents the type of subtle abnormal behavior
-# the project is designed to identify.
-# ============================================================
-
-df["latent_risk_flag"] = (
-    df["dynamic_anomaly"]
-    &
-    ~df["absolute_limit_exceeded"]
-)
-
-
-# ============================================================
-# STEP 18: SEVERITY
-# ============================================================
-
-df["anomaly_severity"] = df.apply(
-    calculate_severity,
-    axis=1
-)
-
-
-# ============================================================
-# STEP 19: FINAL SCREENING STATUS
-# ============================================================
-#
-# REJECT:
-# Absolute specification failure.
-#
-# REVIEW:
-# Dynamic anomaly detected before/without absolute failure.
-#
-# PASS:
-# No significant abnormal behavior.
-# ============================================================
-
-def screening_status(row):
-
-    if row["absolute_limit_exceeded"]:
-
-        return "REJECT"
-
-    if row["dynamic_anomaly"]:
-
-        return "REVIEW"
-
-    return "PASS"
-
-
-df["screening_status"] = df.apply(
-    screening_status,
-    axis=1
-)
-
-
-# ============================================================
-# STEP 20: EXPLAINABILITY
-# ============================================================
-
-df["explanation"] = df.apply(
-    generate_explanation,
-    axis=1
-)
-
-
-# ============================================================
-# STEP 21: RISK SCORE
-# ============================================================
-#
-# This is a transparent prototype risk score.
-#
-# It is NOT another ML model.
-#
-# It combines:
-#
-# Isolation Forest score
-# statistical evidence
-# drift evidence
-# repeated abnormality
-#
-# Score range: 0 - 100
-# ============================================================
-
-df["risk_score"] = (
-    50 * df["anomaly_score"]
-    +
-    15 * df["statistical_evidence"]
-    +
-    20 * df["drift_evidence"]
-    +
-    15 * df["repeated_statistical_anomaly"].astype(int)
-)
-
-df["risk_score"] = (
-    df["risk_score"]
-    .clip(
-        lower=0,
-        upper=100
-    )
-)
-
-
-# ============================================================
-# STEP 22: FINAL RESULTS SUMMARY
-# ============================================================
-
-print("\n" + "=" * 75)
-print("MODULE A RESULTS")
-print("=" * 75)
-
-print("\nIsolation Forest anomalies:")
-
-print(
-    df["isolation_anomaly"]
-    .value_counts()
-)
-
-
-print("\nStatistical anomalies:")
-
-print(
-    df["statistical_anomaly"]
-    .value_counts()
-)
-
-
-print("\nDrift anomalies:")
-
-print(
-    df["drift_anomaly"]
-    .value_counts()
-)
-
-
-print("\nDynamic anomalies:")
-
-print(
-    df["dynamic_anomaly"]
-    .value_counts()
-)
-
-
-print("\nLatent-risk components:")
-
-print(
-    df["latent_risk_flag"]
-    .value_counts()
-)
-
-
-print("\nFinal screening status:")
-
-print(
-    df["screening_status"]
-    .value_counts()
-)
-
-
-print("\nAnomaly severity:")
-
-print(
-    df["anomaly_severity"]
-    .value_counts()
-)
-
-
-# ============================================================
-# STEP 23: GROUND-TRUTH EVALUATION
-# ============================================================
-#
-# IMPORTANT:
-#
-# ground_truth is NOT an input to the ML model.
-#
-# It is used only AFTER prediction for evaluation.
-#
-# This column represents information available to us because
-# this is a synthetic development dataset.
-#
-# A real deployed system will NOT receive ground_truth.
-# ============================================================
-
-print("\n" + "=" * 75)
-print("MODEL EVALUATION")
-print("=" * 75)
-
-
-abnormal_classes = [
-    "High_Stable",
-    "Latent_Defect",
-    "Absolute_Failure",
-    "Sudden_Anomaly"
-]
-
-
-df["actual_anomaly"] = (
-    df["ground_truth"]
-    .isin(abnormal_classes)
-    .astype(int)
-)
-
-
-df["predicted_anomaly"] = (
-    df["dynamic_anomaly"]
-    .astype(int)
-)
-
-
-# ============================================================
-# STEP 24: CONFUSION MATRIX
-# ============================================================
-
-cm = confusion_matrix(
-    df["actual_anomaly"],
-    df["predicted_anomaly"]
-)
-
-
-print("\nConfusion Matrix:")
-
-print("\n                 Predicted")
-
-print(
-    "                 Normal   Anomaly"
-)
-
-print(
-    "Actual Normal    ",
-    cm[0][0],
-    "      ",
-    cm[0][1]
-)
-
-print(
-    "Actual Anomaly   ",
-    cm[1][0],
-    "      ",
-    cm[1][1]
-)
-
-
-tn = cm[0][0]
-
-fp = cm[0][1]
-
-fn = cm[1][0]
-
-tp = cm[1][1]
-
-
-print("\nTrue Negatives :", tn)
-
-print("False Positives:", fp)
-
-print("False Negatives:", fn)
-
-print("True Positives :", tp)
-
-
-# ============================================================
-# STEP 25: PRECISION / RECALL / F1
-# ============================================================
-
-precision = precision_score(
-    df["actual_anomaly"],
-    df["predicted_anomaly"],
-    zero_division=0
-)
-
-recall = recall_score(
-    df["actual_anomaly"],
-    df["predicted_anomaly"],
-    zero_division=0
-)
-
-f1 = f1_score(
-    df["actual_anomaly"],
-    df["predicted_anomaly"],
-    zero_division=0
-)
-
-
-print("\n" + "=" * 75)
-print("ANOMALY DETECTION METRICS")
-print("=" * 75)
-
-print(
-    f"\nPrecision : {precision:.4f}"
-)
-
-print(
-    f"Recall    : {recall:.4f}"
-)
-
-print(
-    f"F1 Score  : {f1:.4f}"
-)
-
-
-# ============================================================
-# STEP 26: CLASSIFICATION REPORT
-# ============================================================
-
-print("\nClassification Report:\n")
-
-print(
-    classification_report(
-        df["actual_anomaly"],
-        df["predicted_anomaly"],
-        target_names=[
-            "Normal",
-            "Anomaly"
-        ],
+    precision = precision_score(
+        y_true,
+        y_pred,
         zero_division=0
     )
-)
 
-
-# ============================================================
-# STEP 27: LATENT DEFECT EVALUATION
-# ============================================================
-#
-# This is one of the most important evaluations for the
-# SIH problem.
-#
-# We ask:
-#
-# How many latent defects were detected?
-#
-# More importantly:
-#
-# How many latent defects were below the absolute static
-# specification limit but still detected dynamically?
-# ============================================================
-
-print("\n" + "=" * 75)
-print("LATENT DEFECT EVALUATION")
-print("=" * 75)
-
-
-latent_df = df[
-    df["ground_truth"]
-    ==
-    "Latent_Defect"
-].copy()
-
-
-total_latent = len(latent_df)
-
-
-detected_latent = (
-    latent_df["dynamic_anomaly"]
-    ==
-    True
-).sum()
-
-
-missed_latent = (
-    latent_df["dynamic_anomaly"]
-    ==
-    False
-).sum()
-
-
-print(
-    f"\nTotal latent defects : {total_latent}"
-)
-
-print(
-    f"Detected             : {detected_latent}"
-)
-
-print(
-    f"Missed               : {missed_latent}"
-)
-
-
-if total_latent > 0:
-
-    latent_detection_rate = (
-        detected_latent /
-        total_latent
-    ) * 100
-
-else:
-
-    latent_detection_rate = 0
-
-
-print(
-    f"Detection rate       : "
-    f"{latent_detection_rate:.2f}%"
-)
-
-
-# ============================================================
-# STEP 28: LATENT DEFECTS BELOW STATIC LIMIT
-# ============================================================
-
-print("\n" + "=" * 75)
-print("LATENT DEFECTS BELOW STATIC LIMIT")
-print("=" * 75)
-
-
-latent_below_limit = latent_df[
-    ~latent_df["absolute_limit_exceeded"]
-].copy()
-
-
-total_latent_below_limit = (
-    len(latent_below_limit)
-)
-
-
-detected_latent_below_limit = (
-    latent_below_limit[
-        "dynamic_anomaly"
-    ]
-    ==
-    True
-).sum()
-
-
-missed_latent_below_limit = (
-    latent_below_limit[
-        "dynamic_anomaly"
-    ]
-    ==
-    False
-).sum()
-
-
-print(
-    f"\nLatent defects below limit : "
-    f"{total_latent_below_limit}"
-)
-
-print(
-    f"Detected dynamically       : "
-    f"{detected_latent_below_limit}"
-)
-
-print(
-    f"Missed                     : "
-    f"{missed_latent_below_limit}"
-)
-
-
-if total_latent_below_limit > 0:
-
-    early_detection_rate = (
-        detected_latent_below_limit /
-        total_latent_below_limit
-    ) * 100
-
-else:
-
-    early_detection_rate = 0
-
-
-print(
-    f"Dynamic detection rate     : "
-    f"{early_detection_rate:.2f}%"
-)
-
-
-# ============================================================
-# STEP 29: FALSE NEGATIVE ANALYSIS
-# ============================================================
-#
-# ISRO's problem statement emphasizes that missing a defective
-# component is particularly serious.
-#
-# Therefore we explicitly show which anomalous components
-# were missed.
-# ============================================================
-
-print("\n" + "=" * 75)
-print("FALSE NEGATIVE ANALYSIS")
-print("=" * 75)
-
-
-false_negatives = df[
-    (
-        df["actual_anomaly"] == 1
+    recall = recall_score(
+        y_true,
+        y_pred,
+        zero_division=0
     )
-    &
-    (
-        df["predicted_anomaly"] == 0
+
+    f1 = f1_score(
+        y_true,
+        y_pred,
+        zero_division=0
     )
-].copy()
+
+    tn, fp, fn, tp = confusion_matrix(
+        y_true,
+        y_pred,
+        labels=[0, 1]
+    ).ravel()
+
+    metrics = {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "true_negative": tn,
+        "false_positive": fp,
+        "false_negative": fn,
+        "true_positive": tp
+    }
+
+    return metrics
 
 
-print(
-    f"\nFalse negatives: "
-    f"{len(false_negatives)}"
-)
+# ============================================================
+# 19. PROCESS ONE CUMULATIVE STAGE
+# ============================================================
 
+def process_stage(df, stage_number, batch_files):
+    """
+    Process one cumulative dataset.
+    """
 
-if len(false_negatives) > 0:
-
+    print()
+    print("=" * 70)
     print(
-        "\nMissed anomalous components:"
+        f"STAGE {stage_number}: "
+        f"{len(df):,} COMPONENTS"
+    )
+    print("=" * 70)
+
+    start_time = time.time()
+
+    # --------------------------------------------------------
+    # Group statistics
+    # --------------------------------------------------------
+
+    print("1/8 Calculating group statistics...")
+
+    result = calculate_group_statistics(
+        df
     )
 
-    print(
-        false_negatives[
-            [
-                "component_id",
-                "lot_id",
-                "iddq_0h_uA",
-                "iddq_24h_uA",
-                "iddq_96h_uA",
-                "iddq_168h_uA",
-                "ground_truth",
-                "anomaly_score",
-                "anomaly_evidence_count"
-            ]
-        ]
-        .head(20)
-        .to_string(
-            index=False
-        )
+    # --------------------------------------------------------
+    # Statistical anomaly detection
+    # --------------------------------------------------------
+
+    print("2/8 Calculating statistical anomaly features...")
+
+    result = calculate_statistical_features(
+        result
     )
 
+    # --------------------------------------------------------
+    # Isolation Forest
+    # --------------------------------------------------------
 
-# ============================================================
-# STEP 30: TOP SUSPICIOUS COMPONENTS
-# ============================================================
+    print("3/8 Running Isolation Forest...")
 
-print("\n" + "=" * 75)
-print("TOP SUSPICIOUS COMPONENTS")
-print("=" * 75)
-
-
-top_anomalies = (
-    df[
-        [
-            "component_id",
-            "lot_id",
-            "iddq_0h_uA",
-            "iddq_24h_uA",
-            "iddq_96h_uA",
-            "iddq_168h_uA",
-            "absolute_limit_uA",
-            "anomaly_score",
-            "risk_score",
-            "abnormal_timepoint_count",
-            "anomaly_evidence_count",
-            "anomaly_severity",
-            "latent_risk_flag",
-            "screening_status",
-            "ground_truth",
-            "explanation"
-        ]
-    ]
-    .sort_values(
-        "risk_score",
-        ascending=False
+    result = calculate_isolation_forest(
+        result
     )
-    .head(20)
-)
 
+    # --------------------------------------------------------
+    # Combined anomaly score
+    # --------------------------------------------------------
 
-print(
-    top_anomalies.to_string(
+    print("4/8 Combining statistical + Isolation Forest scores...")
+
+    result = calculate_combined_anomaly_score(
+        result
+    )
+
+    # --------------------------------------------------------
+    # Specification
+    # --------------------------------------------------------
+
+    print("5/8 Checking specification limits...")
+
+    result = calculate_specification_violation(
+        result
+    )
+
+    # --------------------------------------------------------
+    # Risk
+    # --------------------------------------------------------
+
+    print("6/8 Calculating risk and screening...")
+
+    result = calculate_risk_score(
+        result
+    )
+
+    result = calculate_screening(
+        result
+    )
+
+    # --------------------------------------------------------
+    # Explanation
+    # --------------------------------------------------------
+
+    print("7/8 Generating explanations...")
+
+    result = generate_explanations(
+        result
+    )
+
+    # --------------------------------------------------------
+    # Evaluation
+    # --------------------------------------------------------
+
+    print("8/8 Evaluating against ground truth...")
+
+    metrics = evaluate_ground_truth(
+        result
+    )
+
+    processing_time = (
+        time.time()
+        - start_time
+    )
+
+    # --------------------------------------------------------
+    # Stage metadata
+    # --------------------------------------------------------
+
+    result["stage"] = stage_number
+
+    result["cumulative_components"] = len(
+        result
+    )
+
+    result["batches_processed"] = (
+        stage_number
+    )
+
+    # --------------------------------------------------------
+    # Save stage
+    # --------------------------------------------------------
+
+    os.makedirs(
+        OUTPUT_FOLDER,
+        exist_ok=True
+    )
+
+    stage_file = os.path.join(
+        OUTPUT_FOLDER,
+        f"{STAGE_PREFIX}{stage_number:02d}.csv"
+    )
+
+    result.to_csv(
+        stage_file,
         index=False
     )
-)
 
+    # --------------------------------------------------------
+    # Statistics
+    # --------------------------------------------------------
 
-# ============================================================
-# STEP 31: LATENT-RISK EXAMPLES
-# ============================================================
-
-print("\n" + "=" * 75)
-print("TOP LATENT-RISK COMPONENTS")
-print("=" * 75)
-
-
-latent_risk_components = (
-    df[
-        df["latent_risk_flag"]
-    ][
-        [
-            "component_id",
-            "lot_id",
-            "iddq_0h_uA",
-            "iddq_24h_uA",
-            "iddq_96h_uA",
-            "iddq_168h_uA",
-            "absolute_limit_uA",
-            "anomaly_score",
-            "risk_score",
-            "anomaly_severity",
-            "screening_status",
-            "ground_truth",
-            "explanation"
-        ]
-    ]
-    .sort_values(
-        "risk_score",
-        ascending=False
+    anomalies = int(
+        result["anomaly_flag"].sum()
     )
-    .head(20)
-)
 
+    high_risk = int(
+        (
+            result["risk_level"]
+            .isin(["HIGH", "CRITICAL"])
+        ).sum()
+    )
 
-if len(latent_risk_components) > 0:
+    critical = int(
+        (
+            result["risk_level"]
+            == "CRITICAL"
+        ).sum()
+    )
+
+    pass_count = int(
+        (
+            result["screening_decision"]
+            == "PASS"
+        ).sum()
+    )
+
+    review_count = int(
+        (
+            result["screening_decision"]
+            == "REVIEW"
+        ).sum()
+    )
+
+    reject_count = int(
+        (
+            result["screening_decision"]
+            == "REJECT"
+        ).sum()
+    )
+
+    summary = {
+        "stage": stage_number,
+        "files_processed": stage_number,
+        "components_processed": len(result),
+        "anomalies_detected": anomalies,
+        "high_risk": high_risk,
+        "critical": critical,
+        "pass": pass_count,
+        "review": review_count,
+        "reject": reject_count,
+        "accuracy": metrics["accuracy"],
+        "precision": metrics["precision"],
+        "recall": metrics["recall"],
+        "f1": metrics["f1"],
+        "true_negative": metrics["true_negative"],
+        "false_positive": metrics["false_positive"],
+        "false_negative": metrics["false_negative"],
+        "true_positive": metrics["true_positive"],
+        "processing_time_seconds": round(
+            processing_time,
+            2
+        ),
+        "output_file": stage_file
+    }
+
+    print()
+    print(
+        f"Components: {len(result):,}"
+    )
 
     print(
-        latent_risk_components.to_string(
-            index=False
+        f"Anomalies: {anomalies:,}"
+    )
+
+    print(
+        f"PASS: {pass_count:,}"
+    )
+
+    print(
+        f"REVIEW: {review_count:,}"
+    )
+
+    print(
+        f"REJECT: {reject_count:,}"
+    )
+
+    print(
+        f"Precision: {metrics['precision']:.4f}"
+    )
+
+    print(
+        f"Recall: {metrics['recall']:.4f}"
+    )
+
+    print(
+        f"F1: {metrics['f1']:.4f}"
+    )
+
+    print(
+        f"Time: {processing_time:.2f} seconds"
+    )
+
+    print(
+        f"Saved: {stage_file}"
+    )
+
+    return result, summary
+
+
+# ============================================================
+# 20. MAIN PIPELINE
+# ============================================================
+
+def main():
+
+    print()
+    print("=" * 70)
+    print("SIH 26170 - MODULE A")
+    print("DYNAMIC AND COMPONENT-AWARE ANOMALY DETECTION")
+    print("=" * 70)
+
+    validate_config()
+
+    # --------------------------------------------------------
+    # Find batches
+    # --------------------------------------------------------
+
+    batch_files = get_batch_files()
+
+    print()
+    print(
+        f"Number of batches found: {len(batch_files)}"
+    )
+
+    print()
+
+    for file_path in batch_files:
+
+        print(
+            f"  {os.path.basename(file_path)}"
         )
+
+    # --------------------------------------------------------
+    # Load batches
+    # --------------------------------------------------------
+
+    print()
+    print("Loading batch files...")
+
+    loaded_batches = []
+
+    for file_path in batch_files:
+
+        batch = load_batch(
+            file_path
+        )
+
+        loaded_batches.append(
+            batch
+        )
+
+        print(
+            f"  {os.path.basename(file_path)}: "
+            f"{len(batch):,} rows"
+        )
+
+    total_rows = sum(
+        len(batch)
+        for batch in loaded_batches
     )
 
-else:
+    print()
+    print(
+        f"Total rows: {total_rows:,}"
+    )
+
+    # --------------------------------------------------------
+    # Cumulative processing
+    # --------------------------------------------------------
+
+    cumulative_data = []
+
+    stage_summaries = []
+
+    final_result = None
+
+    for stage_index, batch in enumerate(
+        loaded_batches,
+        start=1
+    ):
+
+        print()
+        print(
+            f"Adding batch {stage_index}..."
+        )
+
+        cumulative_data.append(
+            batch
+        )
+
+        cumulative_df = pd.concat(
+            cumulative_data,
+            ignore_index=True
+        )
+
+        # ----------------------------------------------------
+        # Remove duplicate component IDs
+        # ----------------------------------------------------
+
+        duplicate_count = (
+            cumulative_df[
+                COMPONENT_ID_COLUMN
+            ].duplicated()
+            .sum()
+        )
+
+        if duplicate_count > 0:
+
+            print(
+                f"WARNING: {duplicate_count} "
+                "duplicate component IDs found."
+            )
+
+            cumulative_df = (
+                cumulative_df
+                .drop_duplicates(
+                    subset=[
+                        COMPONENT_ID_COLUMN
+                    ],
+                    keep="last"
+                )
+                .reset_index(drop=True)
+            )
+
+        # ----------------------------------------------------
+        # Process cumulative stage
+        # ----------------------------------------------------
+
+        final_result, summary = process_stage(
+            cumulative_df,
+            stage_index,
+            batch_files[:stage_index]
+        )
+
+        stage_summaries.append(
+            summary
+        )
+
+    # ========================================================
+    # SAVE STAGE SUMMARY
+    # ========================================================
+
+    summary_df = pd.DataFrame(
+        stage_summaries
+    )
+
+    summary_file = os.path.join(
+        OUTPUT_FOLDER,
+        "stage_summary.csv"
+    )
+
+    summary_df.to_csv(
+        summary_file,
+        index=False
+    )
+
+    # ========================================================
+    # SAVE FINAL MODULE A FILE
+    # ========================================================
+
+    final_file_path = os.path.join(
+        "data",
+        FINAL_FILE
+    )
+
+    final_result.to_csv(
+        final_file_path,
+        index=False
+    )
+
+    # ========================================================
+    # FINAL SUMMARY
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("MODULE A COMPLETED")
+    print("=" * 70)
+
+    print()
+    print(
+        f"Total components processed: "
+        f"{len(final_result):,}"
+    )
 
     print(
-        "\nNo latent-risk components detected."
+        f"Final anomalies: "
+        f"{int(final_result['anomaly_flag'].sum()):,}"
     )
+
+    print(
+        f"Final PASS: "
+        f"{int((final_result['screening_decision'] == 'PASS').sum()):,}"
+    )
+
+    print(
+        f"Final REVIEW: "
+        f"{int((final_result['screening_decision'] == 'REVIEW').sum()):,}"
+    )
+
+    print(
+        f"Final REJECT: "
+        f"{int((final_result['screening_decision'] == 'REJECT').sum()):,}"
+    )
+
+    final_metrics = evaluate_ground_truth(
+        final_result
+    )
+
+    print()
+    print("FINAL GROUND-TRUTH EVALUATION")
+    print("-" * 40)
+
+    print(
+        f"Accuracy : {final_metrics['accuracy']:.4f}"
+    )
+
+    print(
+        f"Precision: {final_metrics['precision']:.4f}"
+    )
+
+    print(
+        f"Recall   : {final_metrics['recall']:.4f}"
+    )
+
+    print(
+        f"F1 Score : {final_metrics['f1']:.4f}"
+    )
+
+    print()
+    print(
+        f"Stage results saved to: "
+        f"{OUTPUT_FOLDER}"
+    )
+
+    print(
+        f"Stage summary saved to: "
+        f"{summary_file}"
+    )
+
+    print(
+        f"Final Module A file: "
+        f"{final_file_path}"
+    )
+
+    print()
+    print("=" * 70)
 
 
 # ============================================================
-# STEP 32: SAVE RESULTS
+# ENTRY POINT
 # ============================================================
 
-print("\n" + "=" * 75)
-print("SAVING RESULTS")
-print("=" * 75)
-
-
-df.to_csv(
-    OUTPUT_PATH,
-    index=False
-)
-
-
-print(
-    f"\nResults saved to:\n{OUTPUT_PATH}"
-)
-
-
-# ============================================================
-# FINAL SUMMARY
-# ============================================================
-
-print("\n" + "=" * 75)
-print("MODULE A COMPLETED")
-print("=" * 75)
-
-
-print(
-    "\nTotal components:",
-    len(df)
-)
-
-print(
-    "Dynamic anomalies:",
-    int(
-        df["dynamic_anomaly"].sum()
-    )
-)
-
-print(
-    "Latent-risk components:",
-    int(
-        df["latent_risk_flag"].sum()
-    )
-)
-
-print(
-    "Static-limit failures:",
-    int(
-        df["absolute_limit_exceeded"].sum()
-    )
-)
-
-print(
-    "Final PASS:",
-    int(
-        (
-            df["screening_status"]
-            ==
-            "PASS"
-        ).sum()
-    )
-)
-
-print(
-    "Final REVIEW:",
-    int(
-        (
-            df["screening_status"]
-            ==
-            "REVIEW"
-        ).sum()
-    )
-)
-
-print(
-    "Final REJECT:",
-    int(
-        (
-            df["screening_status"]
-            ==
-            "REJECT"
-        ).sum()
-    )
-)
-
-print(
-    "\nModule A pipeline completed successfully."
-)
-
-print(
-    "\nRemember:"
-)
-
-print(
-    "ground_truth is used ONLY for evaluation."
-)
-
-print(
-    "It is NOT used as a model input."
-)
-
-print(
-    "Module B will predict 168h using early measurements."
-)
-
-print("=" * 75)
+if __name__ == "__main__":
+    main()

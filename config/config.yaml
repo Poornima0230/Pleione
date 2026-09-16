@@ -1,23 +1,67 @@
-parameters:
-  - iddq
-  - leakage
+input:
+  folder: "data"
+  file_pattern: "batch_*.csv"
+  expected_batches: 5
 
-timepoints:
-  - 0
-  - 24
-  - 96
-  - 168
+grouping:
+  columns:
+    - component_type
+    - lot_id
+    - temperature_C
+    - voltage_V
 
-prediction_horizon: 168
+measurements:
+  iddq:
+    - iddq_0h_uA
+    - iddq_24h_uA
+    - iddq_96h_uA
+    - iddq_168h_uA
 
-components:
-  default:
-    limits:
-      iddq:
-        min: 0
-        max: 50
-      leakage:
-        min: 0
-        max: 10
+  leakage:
+    - leakage_0h_uA
+    - leakage_24h_uA
+    - leakage_96h_uA
+    - leakage_168h_uA
 
-missing_value_strategy: interpolate
+columns:
+  component_id: "component_id"
+  lot_id: "lot_id"
+  component_type: "component_type"
+  temperature: "temperature_C"
+  voltage: "voltage_V"
+  ground_truth: "ground_truth"
+  absolute_limit: "absolute_limit_uA"
+
+statistics:
+  calculate:
+    - count
+    - mean
+    - median
+    - std
+    - min
+    - max
+    - q1
+    - q3
+    - iqr
+    - mad
+
+isolation_forest:
+  n_estimators: 300
+  contamination: 0.10
+  random_state: 42
+  n_jobs: -1
+
+anomaly_score:
+  statistical_weight: 0.50
+  isolation_forest_weight: 0.50
+
+anomaly:
+  threshold: 0.50
+screening:
+  pass_threshold: 0.30
+  review_threshold: 0.60
+
+output:
+  folder: "data/module_A_results"
+  stage_prefix: "stage_"
+  final_file: "module_A_anomaly_results.csv"
