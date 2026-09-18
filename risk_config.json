@@ -1,0 +1,51 @@
+{
+  "parameter": {
+    "name": "iddq",
+    "unit": "uA"
+  },
+
+  "prediction": {
+    "horizon": "168h",
+    "value_column": "predicted_168h_uA",
+    "lower_column": "prediction_lower_uA",
+    "upper_column": "prediction_upper_uA"
+  },
+
+  "risk_calculation": {
+    "weights": {
+      "anomaly": 0.30,
+      "drift": 0.25,
+      "future": 0.30,
+      "specification": 0.15
+    }
+  },
+
+  "risk_limits": {
+    "future_limit_watch_ratio": 0.80,
+    "future_limit_high_ratio": 1.00
+  },
+
+  "safety_limits": {
+    "component_types": {}
+  },
+
+  "qa_policy": {
+    "classifications": [
+      {
+        "name": "Pass",
+        "min_risk": 0,
+        "max_risk": 30
+      },
+      {
+        "name": "Monitor",
+        "min_risk": 30,
+        "max_risk": 60
+      },
+      {
+        "name": "Review",
+        "min_risk": 60,
+        "max_risk": 100
+      }
+    ]
+  }
+}
