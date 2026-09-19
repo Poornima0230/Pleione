@@ -1,0 +1,75 @@
+{
+  "component": {
+    "component_id": "C7767",
+    "component_type": "TypeB",
+    "lot_id": "L4"
+  },
+  "parameter_analysis": {
+    "parameter": "predicted",
+    "observed_measurements": [
+      {
+        "column": "predicted_168h_uA",
+        "parameter": "predicted",
+        "hour": 168,
+        "value": 35.97988531710743
+      }
+    ],
+    "latest_observed_value": 35.97988531710743,
+    "latest_observed_time_hours": 168
+  },
+  "specification": {
+    "status": "WITHIN_LIMIT",
+    "applicable_limit": 50.0,
+    "limit_violation": false,
+    "limit_excess": 0.0
+  },
+  "anomaly": {
+    "status": "ANOMALOUS",
+    "reason": "statistical detector; temporal detector; Isolation Forest",
+    "combined_anomaly_score": 0.5736134877373501,
+    "statistical_score": 0.6953534375000001,
+    "temporal_anomaly_score": 1.0,
+    "isolation_forest_score": 0.4518735379747001,
+    "statistical_evidence_count": 0.0
+  },
+  "drift": {
+    "status": "DRIFT_FLAGGED",
+    "reason": "early drift flag; predicted drift rate=0.1644; predicted relative drift=3.3038; safety-slope excess=0.1465",
+    "predicted_drift": 27.619885317107432,
+    "predicted_drift_rate": 0.1644040792684966,
+    "predicted_relative_drift": 3.303814033146822,
+    "safety_slope": 0.0178571428571428,
+    "drift_slope_excess": 0.1465469364113537,
+    "early_drift_flag": true,
+    "future_drift_risk": "HIGH"
+  },
+  "prediction": {
+    "available": true,
+    "prediction_column": "predicted_168h_uA",
+    "prediction_horizon_hours": 168,
+    "predicted_value": 35.97988531710743,
+    "prediction_lower": 10.26284317090458,
+    "prediction_upper": 61.69692746331028,
+    "predicted_limit_exceeded": false,
+    "uncertainty_adjusted_failure": true
+  },
+  "risk": {
+    "risk_score": 59.94111957689028,
+    "risk_factors": {
+      "anomaly_factor": 0.6,
+      "drift_factor": 0.477645,
+      "future_factor": 1.0,
+      "specification_factor": 0.0
+    },
+    "strongest_factor": "future_factor"
+  },
+  "qa_decision": {
+    "classification": "Monitor",
+    "reason": "QA classification: Monitor. anomaly detection produced abnormal evidence. drift analysis identified future or early drift risk. the prediction interval indicates potential future specification failure. future factor is the strongest available risk factor."
+  },
+  "shap": {
+    "available": false,
+    "features": []
+  },
+  "summary": "Component C7767 was analyzed for predicted. The latest observed value is 35.9799 at 168h. Specification status: WITHIN_LIMIT. Anomaly status: ANOMALOUS. Drift status: DRIFT_FLAGGED. A predicted value of 35.9799 is available for 168h. The strongest risk factor reported by the Risk Engine is future factor."
+}

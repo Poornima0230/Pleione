@@ -1,0 +1,75 @@
+{
+  "component": {
+    "component_id": "C9383",
+    "component_type": "TypeC",
+    "lot_id": "L5"
+  },
+  "parameter_analysis": {
+    "parameter": "predicted",
+    "observed_measurements": [
+      {
+        "column": "predicted_168h_uA",
+        "parameter": "predicted",
+        "hour": 168,
+        "value": 23.782559155953063
+      }
+    ],
+    "latest_observed_value": 23.782559155953063,
+    "latest_observed_time_hours": 168
+  },
+  "specification": {
+    "status": "WITHIN_LIMIT",
+    "applicable_limit": 50.0,
+    "limit_violation": false,
+    "limit_excess": 0.0
+  },
+  "anomaly": {
+    "status": "ANOMALY_SCORE_PRESENT",
+    "reason": "No anomaly evidence was flagged by the available detectors.",
+    "combined_anomaly_score": 0.098564604507622,
+    "statistical_score": 0.0,
+    "temporal_anomaly_score": 0.0,
+    "isolation_forest_score": 0.197129209015244,
+    "statistical_evidence_count": 0.0
+  },
+  "drift": {
+    "status": "DRIFT_FLAGGED",
+    "reason": "early drift flag; predicted drift rate=0.0800; predicted relative drift=1.2978; safety-slope excess=0.0621",
+    "predicted_drift": 13.432559155953069,
+    "predicted_drift_rate": 0.0799557092616254,
+    "predicted_relative_drift": 1.2978318025075428,
+    "safety_slope": 0.0178571428571428,
+    "drift_slope_excess": 0.0620985664044825,
+    "early_drift_flag": true,
+    "future_drift_risk": "MEDIUM"
+  },
+  "prediction": {
+    "available": true,
+    "prediction_column": "predicted_168h_uA",
+    "prediction_horizon_hours": 168,
+    "predicted_value": 23.782559155953063,
+    "prediction_lower": -1.9344829902497835,
+    "prediction_upper": 49.49960130215592,
+    "predicted_limit_exceeded": false,
+    "uncertainty_adjusted_failure": false
+  },
+  "risk": {
+    "risk_score": 21.91169936006506,
+    "risk_factors": {
+      "anomaly_factor": 0.068995,
+      "drift_factor": 0.361674,
+      "future_factor": 0.36,
+      "specification_factor": 0.0
+    },
+    "strongest_factor": "drift_factor"
+  },
+  "qa_decision": {
+    "classification": "Pass",
+    "reason": "QA classification: Pass. drift analysis identified future or early drift risk. drift factor is the strongest available risk factor."
+  },
+  "shap": {
+    "available": false,
+    "features": []
+  },
+  "summary": "Component C9383 was analyzed for predicted. The latest observed value is 23.7826 at 168h. Specification status: WITHIN_LIMIT. Anomaly status: ANOMALY_SCORE_PRESENT. Drift status: DRIFT_FLAGGED. A predicted value of 23.7826 is available for 168h. The strongest risk factor reported by the Risk Engine is drift factor."
+}

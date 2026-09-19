@@ -1,1485 +1,1426 @@
-# ============================================================
-# SIH 26170
-# MODULE D: EXPLAINABILITY & SCREENING REPORT
-#
-# PURPOSE
-# ------------------------------------------------------------
-# Convert Module C numerical risk results into:
-#
-#   1. Human-readable explanations
-#   2. Recommended screening actions
-#   3. Priority screening list
-#   4. Component-level reports
-#
-# IMPORTANT
-# ------------------------------------------------------------
-# Module D does NOT:
-#
-#   - train another ML model
-#   - use actual 96h measurements
-#   - use actual 168h measurements
-#   - use ground_truth for decisions
-#
-# It only explains the EARLY-SCREENING decision
-# produced by Module C.
-#
-# ============================================================
+"""
+MODULE D - Explainable AI & Decision Explanation
 
+Consumes the CURRENT Risk Fusion output and produces:
+1. data/module_D_explanations.csv
+2. data/priority_screening_list.csv
+3. data/component_reports/
 
-# ============================================================
-# IMPORTS
-# ============================================================
+Design:
+- Does NOT recalculate anomaly detection
+- Does NOT recalculate drift prediction
+- Does NOT recalculate risk score
+- Uses evidence already produced by Modules A, B and Risk Fusion
+- Handles OBSERVED / PREDICTED / UNAVAILABLE states
+- Avoids hard-coded QA explanations
+- Uses SHAP information if it is already available
+"""
 
-import os
-import pandas as pd
+from pathlib import Path
+import json
+import math
+import re
+import shutil
+
 import numpy as np
+import pandas as pd
 
 
 # ============================================================
-# CONFIGURATION
+# PATHS
 # ============================================================
 
-INPUT_PATH = (
-    "data/final_risk_assessment.csv"
-)
+INPUT_PATH = Path("data/risk/overall_risk_results.csv")
 
-OUTPUT_PATH = (
-    "data/module_D_explanations.csv"
-)
-
-PRIORITY_OUTPUT_PATH = (
-    "data/priority_screening_list.csv"
-)
-
-REPORT_DIRECTORY = (
-    "data/component_reports"
-)
+OUTPUT_PATH = Path("data/module_D_explanations.csv")
+PRIORITY_PATH = Path("data/priority_screening_list.csv")
+REPORT_DIR = Path("data/component_reports")
 
 
 # ============================================================
-# HEADER
+# GENERAL HELPERS
 # ============================================================
 
-print("=" * 70)
-print("SIH 26170")
-print("MODULE D: EXPLAINABILITY & SCREENING REPORT")
-print("=" * 70)
+def is_missing(value):
+    if value is None:
+        return True
+
+    if isinstance(value, str):
+        value = value.strip().lower()
+        return value in {
+            "",
+            "nan",
+            "none",
+            "null",
+            "na",
+            "n/a",
+            "not available",
+            "unavailable",
+        }
+
+    try:
+        return bool(pd.isna(value))
+    except Exception:
+        return False
+
+
+def safe_float(value):
+    if is_missing(value):
+        return None
+
+    try:
+        value = float(value)
+
+        if not np.isfinite(value):
+            return None
+
+        return value
+
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_bool(value):
+    if is_missing(value):
+        return False
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    text = str(value).strip().lower()
+
+    return text in {
+        "true",
+        "1",
+        "yes",
+        "y",
+        "flagged",
+        "anomaly",
+        "failed",
+        "failure",
+        "violation",
+        "critical",
+        "high",
+    }
+
+
+def first_existing(row, columns, default=None):
+    for column in columns:
+        if column in row.index:
+            value = row[column]
+
+            if not is_missing(value):
+                return value
+
+    return default
+
+
+def format_value(value, decimals=4):
+    value = safe_float(value)
+
+    if value is None:
+        return "unavailable"
+
+    return f"{value:.{decimals}f}"
+
+
+def normalize_text(value):
+    if is_missing(value):
+        return None
+
+    return str(value).strip()
 
 
 # ============================================================
-# STEP 1: LOAD MODULE C
+# COLUMN DISCOVERY
 # ============================================================
 
-print("\nLoading Module C results...")
+def detect_parameter_columns(df):
+    """
+    Finds measurement columns without assuming only one parameter.
 
-if not os.path.exists(INPUT_PATH):
+    Examples:
+        iddq_0h_uA
+        iddq_24h_uA
+        leakage_0h_uA
+        propagation_delay_24h_ns
+    """
 
-    raise FileNotFoundError(
-        f"Module C output not found: {INPUT_PATH}"
+    ignored_patterns = [
+        "score",
+        "risk",
+        "factor",
+        "flag",
+        "limit",
+        "margin",
+        "drift",
+        "predicted",
+        "actual",
+        "error",
+        "slope",
+        "hour",
+        "stage",
+        "temperature",
+        "voltage",
+    ]
+
+    candidates = []
+
+    for column in df.columns:
+
+        column_lower = column.lower()
+
+        if not any(
+            token in column_lower
+            for token in ["_0h", "_24h", "_48h", "_72h", "_96h", "_120h", "_144h", "_168h"]
+        ):
+            continue
+
+        if any(pattern in column_lower for pattern in ignored_patterns):
+            continue
+
+        if not pd.api.types.is_numeric_dtype(df[column]):
+            continue
+
+        candidates.append(column)
+
+    return candidates
+
+
+def extract_parameter_name(column):
+    """
+    Converts:
+
+        iddq_0h_uA -> iddq
+        leakage_current_24h_uA -> leakage_current
+        propagation_delay_96h_ns -> propagation_delay
+    """
+
+    if not column:
+        return None
+
+    name = re.sub(
+        r"_(0|24|48|72|96|120|144|168)h",
+        "",
+        column,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove common unit suffixes
+    name = re.sub(
+        r"_(ua|ma|a|mv|v|ns|us|ms|ohm|kohm|mhz|hz|db)$",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    )
+
+    return name
+
+
+def extract_hour(column):
+    if not column:
+        return None
+
+    match = re.search(r"_(\d+)h", column.lower())
+
+    if match:
+        return int(match.group(1))
+
+    return None
+
+
+def discover_observed_measurements(row):
+    measurements = []
+
+    for column in row.index:
+
+        hour = extract_hour(column)
+
+        if hour is None:
+            continue
+
+        if not pd.api.types.is_number(row[column]):
+            continue
+
+        value = safe_float(row[column])
+
+        if value is None:
+            continue
+
+        parameter = extract_parameter_name(column)
+
+        if parameter is None:
+            continue
+
+        measurements.append(
+            {
+                "column": column,
+                "parameter": parameter,
+                "hour": hour,
+                "value": value,
+            }
+        )
+
+    measurements.sort(key=lambda x: x["hour"])
+
+    return measurements
+
+
+# ============================================================
+# PREDICTION DISCOVERY
+# ============================================================
+
+def discover_prediction(row):
+    """
+    Finds prediction information from Module B / Risk Fusion.
+
+    Does not assume the prediction target is always 168h.
+    """
+
+    prediction_candidates = []
+
+    for column in row.index:
+
+        lower = column.lower()
+
+        if "predicted" not in lower:
+            continue
+
+        if not lower.endswith(("_ua", "_ma", "_a", "_v", "_mv", "_ns", "_us")):
+            continue
+
+        value = safe_float(row[column])
+
+        if value is None:
+            continue
+
+        prediction_candidates.append(column)
+
+    if not prediction_candidates:
+        return {
+            "available": False,
+            "column": None,
+            "value": None,
+            "horizon": None,
+        }
+
+    # Prefer the main prediction column
+    preferred = [
+        column
+        for column in prediction_candidates
+        if "predicted_168h" in column.lower()
+    ]
+
+    if preferred:
+        prediction_column = preferred[0]
+    else:
+        prediction_column = prediction_candidates[0]
+
+    value = safe_float(row[prediction_column])
+
+    horizon = extract_hour(prediction_column)
+
+    return {
+        "available": value is not None,
+        "column": prediction_column,
+        "value": value,
+        "horizon": horizon,
+    }
+
+
+# ============================================================
+# SPECIFICATION ANALYSIS
+# ============================================================
+
+def determine_spec_status(row):
+    limit_violation = first_existing(
+        row,
+        [
+            "limit_violation",
+            "specification_violation",
+            "spec_violation",
+        ],
+    )
+
+    if not is_missing(limit_violation):
+        if safe_bool(limit_violation):
+            return "VIOLATED"
+
+    explicit_status = first_existing(
+        row,
+        [
+            "spec_status",
+            "specification_status",
+        ],
+    )
+
+    if explicit_status:
+        return str(explicit_status).upper()
+
+    excess = safe_float(
+        first_existing(
+            row,
+            [
+                "limit_excess_uA",
+                "limit_excess",
+            ],
+        )
+    )
+
+    if excess is not None and excess > 0:
+        return "VIOLATED"
+
+    return "WITHIN_LIMIT"
+
+
+# ============================================================
+# ANOMALY ANALYSIS
+# ============================================================
+
+def determine_anomaly_status(row):
+
+    anomaly_flag = first_existing(
+        row,
+        [
+            "anomaly_flag",
+            "statistical_anomaly_flag",
+            "temporal_anomaly_flag",
+            "isolation_forest_flag",
+        ],
+    )
+
+    if safe_bool(anomaly_flag):
+        return "ANOMALOUS"
+
+    combined_score = safe_float(
+        first_existing(
+            row,
+            [
+                "combined_anomaly_score",
+                "anomaly_score",
+            ],
+        )
+    )
+
+    if combined_score is not None and combined_score > 0:
+        return "ANOMALY_SCORE_PRESENT"
+
+    return "NO_ANOMALY_FLAG"
+
+
+def anomaly_reason(row):
+
+    reasons = []
+
+    if safe_bool(row.get("statistical_anomaly_flag")):
+        reasons.append("statistical detector")
+
+    if safe_bool(row.get("temporal_anomaly_flag")):
+        reasons.append("temporal detector")
+
+    if safe_bool(row.get("isolation_forest_flag")):
+        reasons.append("Isolation Forest")
+
+    evidence_count = safe_float(row.get("statistical_evidence_count"))
+
+    if evidence_count is not None and evidence_count > 0:
+        reasons.append(
+            f"{int(evidence_count)} statistical evidence signal(s)"
+        )
+
+    if safe_bool(row.get("limit_violation")):
+        reasons.append("specification violation")
+
+    if reasons:
+        return "; ".join(reasons)
+
+    return "No anomaly evidence was flagged by the available detectors."
+
+
+# ============================================================
+# DRIFT ANALYSIS
+# ============================================================
+
+def determine_drift_status(row):
+
+    early_drift = safe_bool(row.get("early_drift_flag"))
+
+    drift_excess = safe_float(
+        first_existing(
+            row,
+            [
+                "drift_slope_excess",
+                "predicted_drift_slope_excess",
+            ],
+        )
+    )
+
+    future_drift_risk = normalize_text(
+        first_existing(
+            row,
+            [
+                "future_drift_risk",
+            ],
+        )
+    )
+
+    if early_drift:
+        return "DRIFT_FLAGGED"
+
+    if drift_excess is not None and drift_excess > 0:
+        return "DRIFT_BOUNDARY_EXCEEDED"
+
+    if future_drift_risk:
+        if future_drift_risk.upper() not in {
+            "LOW",
+            "NONE",
+            "NO",
+            "FALSE",
+        }:
+            return "FUTURE_DRIFT_RISK"
+
+    predicted_drift = safe_float(
+        first_existing(
+            row,
+            [
+                "predicted_drift_uA",
+                "predicted_drift",
+            ],
+        )
+    )
+
+    if predicted_drift is not None:
+        return "DRIFT_ANALYZED"
+
+    return "NOT_AVAILABLE"
+
+
+def drift_reason(row):
+
+    reasons = []
+
+    drift_rate = safe_float(row.get("predicted_drift_rate"))
+
+    relative_drift = safe_float(row.get("predicted_relative_drift"))
+
+    slope_excess = safe_float(row.get("drift_slope_excess"))
+
+    if safe_bool(row.get("early_drift_flag")):
+        reasons.append("early drift flag")
+
+    if drift_rate is not None:
+        reasons.append(
+            f"predicted drift rate={format_value(drift_rate)}"
+        )
+
+    if relative_drift is not None:
+        reasons.append(
+            f"predicted relative drift={format_value(relative_drift)}"
+        )
+
+    if slope_excess is not None:
+        reasons.append(
+            f"safety-slope excess={format_value(slope_excess)}"
+        )
+
+    if not reasons:
+        return "No drift evidence is available."
+
+    return "; ".join(reasons)
+
+
+# ============================================================
+# RISK FACTORS
+# ============================================================
+
+def get_risk_factors(row):
+
+    factor_columns = [
+        "anomaly_factor",
+        "drift_factor",
+        "future_factor",
+        "specification_factor",
+    ]
+
+    factors = {}
+
+    for column in factor_columns:
+
+        if column not in row.index:
+            continue
+
+        value = safe_float(row[column])
+
+        if value is not None:
+            factors[column] = round(value, 6)
+
+    if not factors:
+        return {}
+
+    return factors
+
+
+def strongest_risk_factor(row):
+
+    factors = get_risk_factors(row)
+
+    if not factors:
+        return None
+
+    return max(
+        factors,
+        key=lambda key: abs(factors[key])
     )
 
 
-df = pd.read_csv(INPUT_PATH)
+# ============================================================
+# SHAP SUPPORT
+# ============================================================
 
-print(
-    f"Module C components: {len(df)}"
-)
+def get_shap_information(row):
+
+    shap_features = []
+
+    for column in row.index:
+
+        lower = column.lower()
+
+        if "shap" not in lower:
+            continue
+
+        value = row[column]
+
+        if is_missing(value):
+            continue
+
+        shap_features.append(
+            {
+                "feature": column,
+                "value": str(value),
+            }
+        )
+
+    return shap_features
 
 
 # ============================================================
-# STEP 2: REQUIRED COLUMNS
+# QA REASON
 # ============================================================
 
-required_columns = [
+def generate_qa_reason(
+    row,
+    spec_status,
+    anomaly_status,
+    drift_status,
+    prediction,
+    strongest_factor,
+):
 
-    # Identification
-    "component_id",
-    "lot_id",
-    "component_type",
-
-    # Early measurements
-    "iddq_0h_uA",
-    "iddq_24h_uA",
-    "drift_0_24_uA_per_h",
-
-    # Current anomaly
-    "anomaly_score",
-    "current_anomaly_level",
-
-    # Future prediction
-    "predicted_168h_uA",
-    "prediction_lower_uA",
-    "prediction_upper_uA",
-
-    # Specification
-    "absolute_limit_uA",
-
-    # Future drift
-    "predicted_drift_rate",
-    "safety_slope",
-    "drift_slope_excess",
-    "future_drift_risk",
-
-    # Failure indicators
-    "predicted_limit_exceeded",
-    "uncertainty_adjusted_failure",
-
-    # Final decision
-    "risk_score",
-    "final_risk_level",
-    "final_decision"
-
-]
-
-
-missing_columns = [
-
-    column
-
-    for column in required_columns
-
-    if column not in df.columns
-
-]
-
-
-if missing_columns:
-
-    raise ValueError(
-
-        "Missing required Module C columns: "
-        + str(missing_columns)
-
+    classification = normalize_text(
+        first_existing(
+            row,
+            [
+                "qa_classification",
+                "final_risk_level",
+                "risk_level",
+                "final_decision",
+            ],
+            "UNCLASSIFIED",
+        )
     )
 
+    reasons = []
 
-print(
-    "Required column validation: PASS"
-)
+    if spec_status == "VIOLATED":
+        reasons.append("the applicable specification was violated")
 
+    if anomaly_status == "ANOMALOUS":
+        reasons.append("anomaly detection produced abnormal evidence")
 
-# ============================================================
-# STEP 3: DATA TYPE CLEANUP
-# ============================================================
+    if drift_status in {
+        "DRIFT_FLAGGED",
+        "DRIFT_BOUNDARY_EXCEEDED",
+        "FUTURE_DRIFT_RISK",
+    }:
+        reasons.append("drift analysis identified future or early drift risk")
 
-boolean_columns = [
+    if prediction["available"]:
 
-    "predicted_limit_exceeded",
-    "uncertainty_adjusted_failure"
+        predicted_limit_exceeded = safe_bool(
+            row.get("predicted_limit_exceeded")
+        )
 
-]
+        uncertainty_failure = safe_bool(
+            row.get("uncertainty_adjusted_failure")
+        )
 
+        if predicted_limit_exceeded:
+            reasons.append("the predicted future value exceeds the applicable boundary")
 
-for column in boolean_columns:
-
-    if df[column].dtype != bool:
-
-        df[column] = (
-
-            df[column]
-            .astype(str)
-            .str.lower()
-            .isin(
-                [
-                    "true",
-                    "1",
-                    "yes"
-                ]
+        if uncertainty_failure:
+            reasons.append(
+                "the prediction interval indicates potential future specification failure"
             )
 
+    if strongest_factor:
+        factor_label = strongest_factor.replace("_", " ")
+        reasons.append(
+            f"{factor_label} is the strongest available risk factor"
         )
 
-
-numeric_columns = [
-
-    "iddq_0h_uA",
-    "iddq_24h_uA",
-    "drift_0_24_uA_per_h",
-    "anomaly_score",
-    "predicted_168h_uA",
-    "prediction_lower_uA",
-    "prediction_upper_uA",
-    "absolute_limit_uA",
-    "predicted_drift_rate",
-    "safety_slope",
-    "drift_slope_excess",
-    "risk_score"
-
-]
-
-
-for column in numeric_columns:
-
-    df[column] = pd.to_numeric(
-        df[column],
-        errors="coerce"
-    )
-
-
-# ============================================================
-# STEP 4: CALCULATE ADDITIONAL EXPLAINABILITY METRICS
-# ============================================================
-
-# ------------------------------------------------------------
-# Early Iddq change
-# ------------------------------------------------------------
-
-df["early_iddq_change_uA"] = (
-
-    df["iddq_24h_uA"]
-
-    -
-
-    df["iddq_0h_uA"]
-
-)
-
-
-# ------------------------------------------------------------
-# Predicted margin from specification limit
-#
-# Positive = below limit
-# Negative = above limit
-# ------------------------------------------------------------
-
-df["predicted_limit_margin_uA"] = (
-
-    df["absolute_limit_uA"]
-
-    -
-
-    df["predicted_168h_uA"]
-
-)
-
-
-# ------------------------------------------------------------
-# Upper prediction bound margin
-# ------------------------------------------------------------
-
-df["upper_limit_margin_uA"] = (
-
-    df["absolute_limit_uA"]
-
-    -
-
-    df["prediction_upper_uA"]
-
-)
-
-
-# ------------------------------------------------------------
-# Prediction interval width
-# ------------------------------------------------------------
-
-df["prediction_interval_width_uA"] = (
-
-    df["prediction_upper_uA"]
-
-    -
-
-    df["prediction_lower_uA"]
-
-)
-
-
-# ------------------------------------------------------------
-# Percentage of limit used by prediction
-# ------------------------------------------------------------
-
-df["predicted_limit_utilization_percent"] = np.where(
-
-    df["absolute_limit_uA"] > 0,
-
-    (
-        df["predicted_168h_uA"]
-        /
-        df["absolute_limit_uA"]
-        *
-        100
-    ),
-
-    np.nan
-
-)
-
-
-# ------------------------------------------------------------
-# Percentage of limit used by upper uncertainty bound
-# ------------------------------------------------------------
-
-df["upper_limit_utilization_percent"] = np.where(
-
-    df["absolute_limit_uA"] > 0,
-
-    (
-        df["prediction_upper_uA"]
-        /
-        df["absolute_limit_uA"]
-        *
-        100
-    ),
-
-    np.nan
-
-)
-
-
-# ============================================================
-# STEP 5: BUILD EVIDENCE LIST
-# ============================================================
-
-def generate_evidence(row):
-
-    evidence = []
-
-
-    # --------------------------------------------------------
-    # Current anomaly
-    # --------------------------------------------------------
-
-    if row["current_anomaly_level"] == "HIGH":
-
-        evidence.append(
-            "Multiple early anomaly indicators triggered"
+    if not reasons:
+        reasons.append(
+            "no abnormal condition was identified from the available evidence"
         )
-
-    elif row["current_anomaly_level"] == "MEDIUM":
-
-        evidence.append(
-            "Some early anomaly indicators triggered"
-        )
-
-    elif row["current_anomaly_level"] == "LOW":
-
-        evidence.append(
-            "Mild early anomaly evidence detected"
-        )
-
-
-    # --------------------------------------------------------
-    # Early Iddq trend
-    # --------------------------------------------------------
-
-    if row["early_iddq_change_uA"] > 0:
-
-        evidence.append(
-            "Iddq increased between 0h and 24h"
-        )
-
-    elif row["early_iddq_change_uA"] < 0:
-
-        evidence.append(
-            "Iddq decreased between 0h and 24h"
-        )
-
-
-    # --------------------------------------------------------
-    # Future prediction
-    # --------------------------------------------------------
-
-    if row["predicted_limit_exceeded"]:
-
-        evidence.append(
-            "Predicted 168h Iddq exceeds specification limit"
-        )
-
-
-    # --------------------------------------------------------
-    # Prediction uncertainty
-    # --------------------------------------------------------
-
-    if row["uncertainty_adjusted_failure"]:
-
-        evidence.append(
-            "Upper prediction bound reaches or exceeds specification limit"
-        )
-
-
-    # --------------------------------------------------------
-    # Future drift
-    # --------------------------------------------------------
-
-    if row["future_drift_risk"]:
-
-        evidence.append(
-            "Predicted future drift exceeds dynamic safety boundary"
-        )
-
-
-    # --------------------------------------------------------
-    # No evidence
-    # --------------------------------------------------------
-
-    if len(evidence) == 0:
-
-        evidence.append(
-            "No significant early abnormality detected"
-        )
-
-
-    return evidence
-
-
-df["evidence_list"] = df.apply(
-    generate_evidence,
-    axis=1
-)
-
-
-# ============================================================
-# STEP 6: CREATE HUMAN-READABLE EVIDENCE
-# ============================================================
-
-df["evidence_summary"] = (
-
-    df["evidence_list"]
-
-    .apply(
-        lambda items:
-        " | ".join(
-            items
-        )
-    )
-
-)
-
-
-# ============================================================
-# STEP 7: DETERMINE PRIMARY RISK DRIVER
-# ============================================================
-
-def determine_primary_driver(row):
-
-    if row["predicted_limit_exceeded"]:
-
-        return "PREDICTED_FUTURE_FAILURE"
-
-
-    if row["uncertainty_adjusted_failure"]:
-
-        return "UNCERTAINTY_ADJUSTED_FUTURE_FAILURE"
-
-
-    if row["future_drift_risk"]:
-
-        return "FUTURE_DRIFT"
-
-
-    if row["current_anomaly_level"] == "HIGH":
-
-        return "CURRENT_ANOMALY"
-
-
-    if row["current_anomaly_level"] == "MEDIUM":
-
-        return "CURRENT_ANOMALY"
-
-
-    if row["current_anomaly_level"] == "LOW":
-
-        return "MILD_CURRENT_ANOMALY"
-
-
-    return "NO_SIGNIFICANT_RISK"
-
-
-df["primary_risk_driver"] = df.apply(
-
-    determine_primary_driver,
-
-    axis=1
-
-)
-
-
-# ============================================================
-# STEP 8: SCREENING RECOMMENDATION
-# ============================================================
-
-def screening_recommendation(row):
-
-    risk = row["final_risk_level"]
-
-
-    # --------------------------------------------------------
-    # CRITICAL
-    # --------------------------------------------------------
-
-    if risk == "CRITICAL":
-
-        return (
-            "IMMEDIATE ENGINEERING REVIEW: "
-            "Prioritize this component for confirmatory screening "
-            "and investigate the predicted future failure risk."
-        )
-
-
-    # --------------------------------------------------------
-    # HIGH
-    # --------------------------------------------------------
-
-    if risk == "HIGH":
-
-        return (
-            "PRIORITY SCREENING: "
-            "Perform enhanced screening and monitor the component "
-            "for abnormal drift."
-        )
-
-
-    # --------------------------------------------------------
-    # MEDIUM
-    # --------------------------------------------------------
-
-    if risk == "MEDIUM":
-
-        return (
-            "ENHANCED MONITORING: "
-            "Continue monitoring and consider additional screening "
-            "if abnormal behavior persists."
-        )
-
-
-    # --------------------------------------------------------
-    # WATCH
-    # --------------------------------------------------------
-
-    if risk == "WATCH":
-
-        return (
-            "MONITOR: "
-            "Track the component during subsequent screening stages."
-        )
-
-
-    # --------------------------------------------------------
-    # LOW
-    # --------------------------------------------------------
 
     return (
-        "NORMAL MONITORING: "
-        "No significant early risk identified."
+        f"QA classification: {classification}. "
+        + ". ".join(reasons)
+        + "."
     )
-
-
-df["screening_recommendation"] = df.apply(
-
-    screening_recommendation,
-
-    axis=1
-
-)
 
 
 # ============================================================
-# STEP 9: GENERATE ENGINEER-FRIENDLY EXPLANATION
+# SUMMARY
 # ============================================================
 
-def generate_detailed_explanation(row):
+def generate_summary(
+    row,
+    parameter,
+    observed,
+    prediction,
+    spec_status,
+    anomaly_status,
+    drift_status,
+    strongest_factor,
+):
 
-    explanation = []
-
-
-    # --------------------------------------------------------
-    # Opening
-    # --------------------------------------------------------
-
-    explanation.append(
-
-        f"Component {row['component_id']} "
-        f"has been classified as "
-        f"{row['final_risk_level']} risk."
+    component_id = normalize_text(
+        first_existing(
+            row,
+            ["component_id", "component", "id"],
+            "Unknown component",
+        )
     )
 
+    parts = [
+        f"Component {component_id} was analyzed for {parameter or 'the available electrical parameter(s)'}."
+    ]
 
-    # --------------------------------------------------------
-    # Current behavior
-    # --------------------------------------------------------
+    if observed:
 
-    explanation.append(
+        latest = observed[-1]
 
-        f"Early Iddq changed from "
-        f"{row['iddq_0h_uA']:.2f} µA at 0h "
-        f"to "
-        f"{row['iddq_24h_uA']:.2f} µA at 24h."
-    )
-
-
-    explanation.append(
-
-        f"The early drift rate is "
-        f"{row['drift_0_24_uA_per_h']:.4f} µA/hour."
-    )
-
-
-    # --------------------------------------------------------
-    # Current anomaly
-    # --------------------------------------------------------
-
-    explanation.append(
-
-        f"Current anomaly level is "
-        f"{row['current_anomaly_level']} "
-        f"with an anomaly evidence score of "
-        f"{row['anomaly_score']:.2f}."
-    )
-
-
-    # --------------------------------------------------------
-    # Future prediction
-    # --------------------------------------------------------
-
-    explanation.append(
-
-        f"The model predicts "
-        f"{row['predicted_168h_uA']:.2f} µA "
-        f"at 168h."
-    )
-
-
-    # --------------------------------------------------------
-    # Limit
-    # --------------------------------------------------------
-
-    explanation.append(
-
-        f"The applicable prototype specification limit is "
-        f"{row['absolute_limit_uA']:.2f} µA."
-    )
-
-
-    # --------------------------------------------------------
-    # Prediction margin
-    # --------------------------------------------------------
-
-    margin = row["predicted_limit_margin_uA"]
-
-
-    if margin < 0:
-
-        explanation.append(
-
-            f"The prediction is "
-            f"{abs(margin):.2f} µA above "
-            f"the limit."
+        parts.append(
+            f"The latest observed value is {format_value(latest['value'])} "
+            f"at {latest['hour']}h."
         )
 
     else:
-
-        explanation.append(
-
-            f"The prediction remains "
-            f"{margin:.2f} µA below "
-            f"the limit."
+        parts.append(
+            "No directly observed measurement was available in the Risk Fusion output."
         )
 
-
-    # --------------------------------------------------------
-    # Uncertainty
-    # --------------------------------------------------------
-
-    explanation.append(
-
-        f"The 90% prediction interval is approximately "
-        f"{row['prediction_lower_uA']:.2f} to "
-        f"{row['prediction_upper_uA']:.2f} µA."
+    parts.append(
+        f"Specification status: {spec_status}."
     )
 
+    parts.append(
+        f"Anomaly status: {anomaly_status}."
+    )
 
-    # --------------------------------------------------------
-    # Drift
-    # --------------------------------------------------------
+    parts.append(
+        f"Drift status: {drift_status}."
+    )
 
-    if row["future_drift_risk"]:
+    if prediction["available"]:
 
-        explanation.append(
-
-            "The predicted future drift is above "
-            "the dynamic safety boundary."
+        horizon_text = (
+            f"{prediction['horizon']}h"
+            if prediction["horizon"] is not None
+            else "the configured prediction horizon"
         )
 
-
-    # --------------------------------------------------------
-    # Final decision
-    # --------------------------------------------------------
-
-    explanation.append(
-
-        f"Final screening decision: "
-        f"{row['final_decision']}."
-    )
-
-
-    return " ".join(explanation)
-
-
-df["detailed_explanation"] = df.apply(
-
-    generate_detailed_explanation,
-
-    axis=1
-
-)
-
-
-# ============================================================
-# STEP 10: CREATE SCREENING CATEGORY
-# ============================================================
-
-def screening_category(row):
-
-    risk = row["final_risk_level"]
-
-
-    if risk == "CRITICAL":
-
-        return "IMMEDIATE_REVIEW"
-
-
-    if risk == "HIGH":
-
-        return "PRIORITY_SCREENING"
-
-
-    if risk == "MEDIUM":
-
-        return "ENHANCED_MONITORING"
-
-
-    if risk == "WATCH":
-
-        return "MONITOR"
-
-
-    return "NORMAL"
-
-
-df["screening_category"] = df.apply(
-
-    screening_category,
-
-    axis=1
-
-)
-
-
-# ============================================================
-# STEP 11: RISK PRIORITY
-# ============================================================
-
-priority_map = {
-
-    "CRITICAL": 1,
-
-    "HIGH": 2,
-
-    "MEDIUM": 3,
-
-    "WATCH": 4,
-
-    "LOW": 5
-
-}
-
-
-df["screening_priority"] = (
-
-    df["final_risk_level"]
-
-    .map(priority_map)
-
-)
-
-
-# ============================================================
-# STEP 12: SORT COMPONENTS
-# ============================================================
-
-df = df.sort_values(
-
-    [
-
-        "screening_priority",
-
-        "risk_score",
-
-        "drift_slope_excess"
-
-    ],
-
-    ascending=[
-
-        True,
-
-        False,
-
-        False
-
-    ]
-
-)
-
-
-# ============================================================
-# STEP 13: SELECT OUTPUT COLUMNS
-# ============================================================
-
-output_columns = [
-
-    # Identification
-    "component_id",
-    "lot_id",
-    "component_type",
-
-    # Early measurements
-    "iddq_0h_uA",
-    "iddq_24h_uA",
-    "early_iddq_change_uA",
-    "drift_0_24_uA_per_h",
-
-    # Current anomaly
-    "anomaly_score",
-    "current_anomaly_level",
-
-    # Future prediction
-    "predicted_168h_uA",
-    "prediction_lower_uA",
-    "prediction_upper_uA",
-
-    # Specification
-    "absolute_limit_uA",
-    "predicted_limit_margin_uA",
-    "upper_limit_margin_uA",
-
-    # Prediction information
-    "predicted_limit_utilization_percent",
-    "upper_limit_utilization_percent",
-    "prediction_interval_width_uA",
-
-    # Drift
-    "predicted_drift_rate",
-    "safety_slope",
-    "drift_slope_excess",
-    "future_drift_risk",
-
-    # Risk
-    "risk_score",
-    "final_risk_level",
-    "final_decision",
-
-    # Explainability
-    "primary_risk_driver",
-    "evidence_summary",
-    "screening_category",
-    "screening_recommendation",
-    "detailed_explanation"
-
-]
-
-
-explanations_df = df[
-    output_columns
-].copy()
-
-
-# ============================================================
-# STEP 14: SAVE EXPLANATION DATASET
-# ============================================================
-
-os.makedirs(
-    "data",
-    exist_ok=True
-)
-
-explanations_df.to_csv(
-
-    OUTPUT_PATH,
-
-    index=False
-
-)
-
-
-# ============================================================
-# STEP 15: CREATE PRIORITY SCREENING LIST
-# ============================================================
-
-priority_df = explanations_df[
-
-    explanations_df[
-        "final_risk_level"
-    ].isin(
-        [
-            "CRITICAL",
-            "HIGH"
-        ]
-    )
-
-].copy()
-
-
-priority_columns = [
-
-    "component_id",
-    "lot_id",
-    "component_type",
-
-    "iddq_0h_uA",
-    "iddq_24h_uA",
-
-    "predicted_168h_uA",
-    "absolute_limit_uA",
-
-    "predicted_limit_margin_uA",
-
-    "prediction_upper_uA",
-
-    "upper_limit_margin_uA",
-
-    "predicted_drift_rate",
-    "safety_slope",
-
-    "risk_score",
-    "final_risk_level",
-    "final_decision",
-
-    "primary_risk_driver",
-
-    "screening_recommendation"
-
-]
-
-
-priority_df = priority_df[
-    priority_columns
-]
-
-
-priority_df.to_csv(
-
-    PRIORITY_OUTPUT_PATH,
-
-    index=False
-
-)
-
-
-# ============================================================
-# STEP 16: CREATE COMPONENT REPORT DIRECTORY
-# ============================================================
-
-os.makedirs(
-
-    REPORT_DIRECTORY,
-
-    exist_ok=True
-
-)
-
-
-# ============================================================
-# STEP 17: GENERATE INDIVIDUAL COMPONENT REPORTS
-# ============================================================
-
-print("\nGenerating component reports...")
-
-
-for _, row in explanations_df.iterrows():
-
-    component_id = str(
-        row["component_id"]
-    )
-
-
-    report_path = os.path.join(
-
-        REPORT_DIRECTORY,
-
-        f"{component_id}.txt"
-
-    )
-
-
-    report = []
-
-    report.append(
-        "=" * 70
-    )
-
-    report.append(
-        "SIH 26170 - COMPONENT SCREENING REPORT"
-    )
-
-    report.append(
-        "=" * 70
-    )
-
-    report.append("")
-
-    report.append(
-        f"Component ID       : {component_id}"
-    )
-
-    report.append(
-        f"Lot                 : {row['lot_id']}"
-    )
-
-    report.append(
-        f"Component Type     : {row['component_type']}"
-    )
-
-    report.append("")
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        "EARLY MEASUREMENTS"
-    )
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        f"Iddq at 0h          : "
-        f"{row['iddq_0h_uA']:.3f} µA"
-    )
-
-    report.append(
-        f"Iddq at 24h         : "
-        f"{row['iddq_24h_uA']:.3f} µA"
-    )
-
-    report.append(
-        f"Early change        : "
-        f"{row['early_iddq_change_uA']:.3f} µA"
-    )
-
-    report.append(
-        f"Early drift rate    : "
-        f"{row['drift_0_24_uA_per_h']:.6f} µA/hour"
-    )
-
-    report.append("")
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        "CURRENT ANOMALY"
-    )
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        f"Anomaly score       : "
-        f"{row['anomaly_score']:.3f}"
-    )
-
-    report.append(
-        f"Anomaly level       : "
-        f"{row['current_anomaly_level']}"
-    )
-
-    report.append("")
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        "FUTURE PREDICTION"
-    )
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        f"Predicted 168h Iddq : "
-        f"{row['predicted_168h_uA']:.3f} µA"
-    )
-
-    report.append(
-        f"Prediction lower    : "
-        f"{row['prediction_lower_uA']:.3f} µA"
-    )
-
-    report.append(
-        f"Prediction upper    : "
-        f"{row['prediction_upper_uA']:.3f} µA"
-    )
-
-    report.append(
-        f"Specification limit : "
-        f"{row['absolute_limit_uA']:.3f} µA"
-    )
-
-    report.append(
-        f"Prediction margin   : "
-        f"{row['predicted_limit_margin_uA']:.3f} µA"
-    )
-
-    report.append("")
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        "FUTURE DRIFT"
-    )
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        f"Predicted drift     : "
-        f"{row['predicted_drift_rate']:.6f}"
-    )
-
-    report.append(
-        f"Safety slope        : "
-        f"{row['safety_slope']:.6f}"
-    )
-
-    report.append(
-        f"Drift slope excess  : "
-        f"{row['drift_slope_excess']:.6f}"
-    )
-
-    report.append(
-        f"Future drift risk   : "
-        f"{row['future_drift_risk']}"
-    )
-
-    report.append("")
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        "RISK ASSESSMENT"
-    )
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        f"Risk score          : "
-        f"{row['risk_score']:.2f}"
-    )
-
-    report.append(
-        f"Risk level          : "
-        f"{row['final_risk_level']}"
-    )
-
-    report.append(
-        f"Decision            : "
-        f"{row['final_decision']}"
-    )
-
-    report.append(
-        f"Primary driver      : "
-        f"{row['primary_risk_driver']}"
-    )
-
-    report.append("")
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        "WHY WAS THIS COMPONENT FLAGGED?"
-    )
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        row["evidence_summary"]
-    )
-
-    report.append("")
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        "SCREENING RECOMMENDATION"
-    )
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        row["screening_recommendation"]
-    )
-
-    report.append("")
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        "DETAILED EXPLANATION"
-    )
-
-    report.append(
-        "-" * 70
-    )
-
-    report.append(
-        row["detailed_explanation"]
-    )
-
-    report.append("")
-
-    report.append(
-        "=" * 70
-    )
-
-    report.append(
-        "Prototype screening result."
-    )
-
-    report.append(
-        "Not an ISRO-qualified engineering limit or decision."
-    )
-
-    report.append(
-        "=" * 70
-    )
-
-
-    with open(
-
-        report_path,
-
-        "w",
-
-        encoding="utf-8"
-
-    ) as file:
-
-        file.write(
-            "\n".join(report)
+        parts.append(
+            f"A predicted value of {format_value(prediction['value'])} "
+            f"is available for {horizon_text}."
         )
 
+    else:
+        parts.append(
+            "No future prediction is available."
+        )
 
-# ============================================================
-# STEP 18: SUMMARY
-# ============================================================
+    if strongest_factor:
 
-print("\n" + "=" * 70)
-print("MODULE D SUMMARY")
-print("=" * 70)
+        parts.append(
+            f"The strongest risk factor reported by the Risk Engine is "
+            f"{strongest_factor.replace('_', ' ')}."
+        )
 
-
-print(
-    "\nComponents explained:",
-    len(explanations_df)
-)
-
-
-print(
-    "\nRisk distribution:"
-)
-
-
-print(
-
-    explanations_df[
-        "final_risk_level"
-    ].value_counts()
-
-)
-
-
-print(
-    "\nPrimary risk drivers:"
-)
-
-
-print(
-
-    explanations_df[
-        "primary_risk_driver"
-    ].value_counts()
-
-)
-
-
-print(
-    "\nPriority components:",
-    len(priority_df)
-)
+    return " ".join(parts)
 
 
 # ============================================================
-# STEP 19: DISPLAY TOP PRIORITY COMPONENTS
+# STRUCTURED EXPLANATION
 # ============================================================
 
-print("\n" + "=" * 70)
-print("TOP PRIORITY SCREENING COMPONENTS")
-print("=" * 70)
+def build_explanation(row):
 
-
-display_columns = [
-
-    "component_id",
-    "lot_id",
-    "component_type",
-
-    "predicted_168h_uA",
-    "absolute_limit_uA",
-
-    "predicted_limit_margin_uA",
-
-    "risk_score",
-
-    "final_risk_level",
-
-    "final_decision",
-
-    "primary_risk_driver"
-
-]
-
-
-print(
-
-    priority_df[
-        display_columns
-    ]
-    .head(20)
-    .to_string(
-        index=False
+    component_id = normalize_text(
+        first_existing(
+            row,
+            ["component_id", "component", "id"],
+            "UNKNOWN",
+        )
     )
 
-)
+    component_type = normalize_text(
+        first_existing(
+            row,
+            ["component_type", "component_category", "type"],
+            "UNKNOWN",
+        )
+    )
+
+    lot_id = normalize_text(
+        first_existing(
+            row,
+            ["lot_id", "lot", "batch_id"],
+            "UNKNOWN",
+        )
+    )
+
+    observed = discover_observed_measurements(row)
+
+    if observed:
+        parameter = observed[-1]["parameter"]
+    else:
+        parameter = None
+
+    prediction = discover_prediction(row)
+
+    spec_status = determine_spec_status(row)
+
+    anomaly_status = determine_anomaly_status(row)
+
+    drift_status = determine_drift_status(row)
+
+    risk_factors = get_risk_factors(row)
+
+    strongest_factor = strongest_risk_factor(row)
+
+    shap_features = get_shap_information(row)
+
+    risk_score = safe_float(
+        first_existing(
+            row,
+            [
+                "risk_score",
+                "risk_score_100",
+            ],
+        )
+    )
+
+    qa_classification = normalize_text(
+        first_existing(
+            row,
+            [
+                "qa_classification",
+                "final_risk_level",
+                "risk_level",
+                "final_decision",
+            ],
+            "UNCLASSIFIED",
+        )
+    )
+
+    spec_limit = safe_float(
+        first_existing(
+            row,
+            [
+                "absolute_limit_uA",
+                "spec_upper",
+                "upper_limit",
+            ],
+        )
+    )
+
+    predicted_limit_exceeded = safe_bool(
+        row.get("predicted_limit_exceeded")
+    )
+
+    uncertainty_adjusted_failure = safe_bool(
+        row.get("uncertainty_adjusted_failure")
+    )
+
+    qa_reason = generate_qa_reason(
+        row,
+        spec_status,
+        anomaly_status,
+        drift_status,
+        prediction,
+        strongest_factor,
+    )
+
+    summary = generate_summary(
+        row,
+        parameter,
+        observed,
+        prediction,
+        spec_status,
+        anomaly_status,
+        drift_status,
+        strongest_factor,
+    )
+
+    explanation = {
+        "component": {
+            "component_id": component_id,
+            "component_type": component_type,
+            "lot_id": lot_id,
+        },
+
+        "parameter_analysis": {
+            "parameter": parameter,
+            "observed_measurements": observed,
+            "latest_observed_value": (
+                observed[-1]["value"]
+                if observed
+                else None
+            ),
+            "latest_observed_time_hours": (
+                observed[-1]["hour"]
+                if observed
+                else None
+            ),
+        },
+
+        "specification": {
+            "status": spec_status,
+            "applicable_limit": spec_limit,
+            "limit_violation": safe_bool(
+                row.get("limit_violation")
+            ),
+            "limit_excess": safe_float(
+                first_existing(
+                    row,
+                    [
+                        "limit_excess_uA",
+                        "limit_excess",
+                    ],
+                )
+            ),
+        },
+
+        "anomaly": {
+            "status": anomaly_status,
+            "reason": anomaly_reason(row),
+            "combined_anomaly_score": safe_float(
+                row.get("combined_anomaly_score")
+            ),
+            "statistical_score": safe_float(
+                row.get("statistical_score")
+            ),
+            "temporal_anomaly_score": safe_float(
+                row.get("temporal_anomaly_score")
+            ),
+            "isolation_forest_score": safe_float(
+                row.get("isolation_forest_score")
+            ),
+            "statistical_evidence_count": safe_float(
+                row.get("statistical_evidence_count")
+            ),
+        },
+
+        "drift": {
+            "status": drift_status,
+            "reason": drift_reason(row),
+            "predicted_drift": safe_float(
+                first_existing(
+                    row,
+                    [
+                        "predicted_drift_uA",
+                        "predicted_drift",
+                    ],
+                )
+            ),
+            "predicted_drift_rate": safe_float(
+                row.get("predicted_drift_rate")
+            ),
+            "predicted_relative_drift": safe_float(
+                row.get("predicted_relative_drift")
+            ),
+            "safety_slope": safe_float(
+                row.get("safety_slope")
+            ),
+            "drift_slope_excess": safe_float(
+                row.get("drift_slope_excess")
+            ),
+            "early_drift_flag": safe_bool(
+                row.get("early_drift_flag")
+            ),
+            "future_drift_risk": normalize_text(
+                row.get("future_drift_risk")
+            ),
+        },
+
+        "prediction": {
+            "available": prediction["available"],
+            "prediction_column": prediction["column"],
+            "prediction_horizon_hours": prediction["horizon"],
+            "predicted_value": prediction["value"],
+            "prediction_lower": safe_float(
+                first_existing(
+                    row,
+                    [
+                        "prediction_lower_uA",
+                        "prediction_lower",
+                    ],
+                )
+            ),
+            "prediction_upper": safe_float(
+                first_existing(
+                    row,
+                    [
+                        "prediction_upper_uA",
+                        "prediction_upper",
+                    ],
+                )
+            ),
+            "predicted_limit_exceeded": predicted_limit_exceeded,
+            "uncertainty_adjusted_failure": uncertainty_adjusted_failure,
+        },
+
+        "risk": {
+            "risk_score": risk_score,
+            "risk_factors": risk_factors,
+            "strongest_factor": strongest_factor,
+        },
+
+        "qa_decision": {
+            "classification": qa_classification,
+            "reason": qa_reason,
+        },
+
+        "shap": {
+            "available": bool(shap_features),
+            "features": shap_features,
+        },
+
+        "summary": summary,
+    }
+
+    return explanation
 
 
 # ============================================================
-# STEP 20: EARLY-SCREENING AUDIT
+# SCREENING PRIORITY
 # ============================================================
 
-forbidden_columns = [
+def priority_rank(row):
 
-    "iddq_96h_uA",
-    "iddq_168h_uA",
+    classification = str(
+        first_existing(
+            row,
+            [
+                "qa_classification",
+                "final_risk_level",
+                "risk_level",
+            ],
+            "",
+        )
+    ).upper()
 
-    "zscore_96h",
-    "zscore_168h",
+    ranking = {
+        "CRITICAL": 1,
+        "HIGH": 2,
+        "MEDIUM": 3,
+        "WATCH": 4,
+        "LOW": 5,
+        "NORMAL": 5,
+    }
 
-    "z_anomaly_96h",
-    "z_anomaly_168h",
+    if classification in ranking:
+        return ranking[classification]
 
-    "robust_zscore_96h",
-    "robust_zscore_168h",
-
-    "iqr_anomaly_96h",
-    "iqr_anomaly_168h",
-
-    "ground_truth"
-
-]
-
-
-used_forbidden = [
-
-    column
-
-    for column in forbidden_columns
-
-    if column in explanations_df.columns
-
-]
-
-
-print("\n" + "=" * 70)
-print("MODULE D EARLY-SCREENING AUDIT")
-print("=" * 70)
-
-
-if len(used_forbidden) == 0:
-
-    print(
-        "\nPASS:"
+    risk_score = safe_float(
+        first_existing(
+            row,
+            [
+                "risk_score",
+                "risk_score_100",
+            ],
+            0,
+        )
     )
 
-    print(
-        "No actual future measurements or ground-truth "
-        "columns are included in Module D outputs."
+    if risk_score is None:
+        risk_score = 0
+
+    if risk_score >= 80:
+        return 1
+    if risk_score >= 60:
+        return 2
+    if risk_score >= 40:
+        return 3
+    if risk_score >= 20:
+        return 4
+
+    return 5
+
+
+def screening_recommendation(classification):
+
+    classification = str(classification).upper()
+
+    recommendations = {
+        "CRITICAL": "Immediate engineering review and screening hold.",
+        "HIGH": "Prioritize engineering review and additional screening.",
+        "MEDIUM": "Review anomaly and drift evidence before release.",
+        "WATCH": "Monitor and review according to QA policy.",
+        "LOW": "No additional action indicated by the current risk assessment.",
+        "NORMAL": "No additional action indicated by the current risk assessment.",
+    }
+
+    return recommendations.get(
+        classification,
+        "Follow the configured QA policy for this classification.",
     )
 
-else:
 
-    print(
-        "\nWARNING:"
+# ============================================================
+# MAIN PROCESS
+# ============================================================
+
+def main():
+
+    print("=" * 70)
+    print("MODULE D: EXPLAINABLE AI & DECISION EXPLANATION")
+    print("=" * 70)
+
+    if not INPUT_PATH.exists():
+
+        raise FileNotFoundError(
+            f"Risk Fusion output not found:\n{INPUT_PATH}\n\n"
+            "Run Module C successfully before running Module D."
+        )
+
+    print(f"Loading Risk Fusion results: {INPUT_PATH}")
+
+    df = pd.read_csv(INPUT_PATH)
+
+    if df.empty:
+        raise ValueError(
+            "Risk Fusion output exists but contains no rows."
+        )
+
+    print(f"Components received: {len(df)}")
+    print(f"Columns received: {len(df.columns)}")
+
+    # --------------------------------------------------------
+    # Create output directories
+    # --------------------------------------------------------
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    print(
-        "Forbidden evaluation columns found:"
+    explanations = []
+    priority_rows = []
+
+    # --------------------------------------------------------
+    # Process each component
+    # --------------------------------------------------------
+
+    for _, row in df.iterrows():
+
+        explanation = build_explanation(row)
+
+        component_id = explanation["component"]["component_id"]
+
+        classification = explanation["qa_decision"]["classification"]
+
+        risk_score = explanation["risk"]["risk_score"]
+
+        priority_rows.append(
+            {
+                "component_id": component_id,
+                "component_type": explanation["component"]["component_type"],
+                "lot_id": explanation["component"]["lot_id"],
+                "risk_score": risk_score,
+                "qa_classification": classification,
+                "priority_rank": priority_rank(row),
+                "screening_recommendation": screening_recommendation(
+                    classification
+                ),
+                "strongest_risk_factor": explanation["risk"][
+                    "strongest_factor"
+                ],
+                "explanation_summary": explanation["summary"],
+            }
+        )
+
+        # ----------------------------------------------------
+        # Flat output for CSV
+        # ----------------------------------------------------
+
+        explanations.append(
+            {
+                "component_id": component_id,
+
+                "component_type": explanation["component"][
+                    "component_type"
+                ],
+
+                "lot_id": explanation["component"]["lot_id"],
+
+                "parameter": explanation["parameter_analysis"][
+                    "parameter"
+                ],
+
+                "latest_observed_value": explanation[
+                    "parameter_analysis"
+                ]["latest_observed_value"],
+
+                "latest_observed_time_hours": explanation[
+                    "parameter_analysis"
+                ]["latest_observed_time_hours"],
+
+                "spec_status": explanation["specification"][
+                    "status"
+                ],
+
+                "spec_limit": explanation["specification"][
+                    "applicable_limit"
+                ],
+
+                "anomaly_status": explanation["anomaly"][
+                    "status"
+                ],
+
+                "anomaly_reason": explanation["anomaly"][
+                    "reason"
+                ],
+
+                "combined_anomaly_score": explanation["anomaly"][
+                    "combined_anomaly_score"
+                ],
+
+                "drift_status": explanation["drift"][
+                    "status"
+                ],
+
+                "drift_reason": explanation["drift"][
+                    "reason"
+                ],
+
+                "prediction_available": explanation[
+                    "prediction"
+                ]["available"],
+
+                "prediction_horizon_hours": explanation[
+                    "prediction"
+                ]["prediction_horizon_hours"],
+
+                "predicted_value": explanation[
+                    "prediction"
+                ]["predicted_value"],
+
+                "prediction_lower": explanation[
+                    "prediction"
+                ]["prediction_lower"],
+
+                "prediction_upper": explanation[
+                    "prediction"
+                ]["prediction_upper"],
+
+                "predicted_limit_exceeded": explanation[
+                    "prediction"
+                ]["predicted_limit_exceeded"],
+
+                "uncertainty_adjusted_failure": explanation[
+                    "prediction"
+                ]["uncertainty_adjusted_failure"],
+
+                "anomaly_factor": explanation["risk"][
+                    "risk_factors"
+                ].get("anomaly_factor"),
+
+                "drift_factor": explanation["risk"][
+                    "risk_factors"
+                ].get("drift_factor"),
+
+                "future_factor": explanation["risk"][
+                    "risk_factors"
+                ].get("future_factor"),
+
+                "specification_factor": explanation["risk"][
+                    "risk_factors"
+                ].get("specification_factor"),
+
+                "strongest_risk_factor": explanation["risk"][
+                    "strongest_factor"
+                ],
+
+                "risk_score": explanation["risk"][
+                    "risk_score"
+                ],
+
+                "qa_classification": explanation[
+                    "qa_decision"
+                ]["classification"],
+
+                "qa_reason": explanation["qa_decision"][
+                    "reason"
+                ],
+
+                "shap_available": explanation["shap"][
+                    "available"
+                ],
+
+                "shap_top_features": json.dumps(
+                    explanation["shap"]["features"],
+                    ensure_ascii=False,
+                ),
+
+                "explanation_summary": explanation[
+                    "summary"
+                ],
+
+                "explanation_json": json.dumps(
+                    explanation,
+                    ensure_ascii=False,
+                ),
+            }
+        )
+
+        # ----------------------------------------------------
+        # Individual component report
+        # ----------------------------------------------------
+
+        safe_component_id = re.sub(
+            r"[^A-Za-z0-9_.-]",
+            "_",
+            str(component_id),
+        )
+
+        report_path = REPORT_DIR / (
+            f"{safe_component_id}_explanation.json"
+        )
+
+        with open(
+            report_path,
+            "w",
+            encoding="utf-8",
+        ) as report_file:
+
+            json.dump(
+                explanation,
+                report_file,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+    # ========================================================
+    # SAVE EXPLANATIONS
+    # ========================================================
+
+    explanation_df = pd.DataFrame(explanations)
+
+    explanation_df.to_csv(
+        OUTPUT_PATH,
+        index=False,
     )
 
-    for column in used_forbidden:
+    # ========================================================
+    # SAVE PRIORITY SCREENING LIST
+    # ========================================================
+
+    priority_df = pd.DataFrame(priority_rows)
+
+    priority_df = priority_df.sort_values(
+        by=[
+            "priority_rank",
+            "risk_score",
+        ],
+        ascending=[
+            True,
+            False,
+        ],
+        na_position="last",
+    )
+
+    priority_df.to_csv(
+        PRIORITY_PATH,
+        index=False,
+    )
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    print()
+    print("MODULE D COMPLETED")
+    print("-" * 70)
+
+    print(f"Explanation file : {OUTPUT_PATH}")
+    print(f"Priority file    : {PRIORITY_PATH}")
+    print(f"Reports directory: {REPORT_DIR}")
+
+    print()
+    print(f"Components processed: {len(explanation_df)}")
+
+    if "qa_classification" in explanation_df.columns:
+
+        print()
+        print("QA classification distribution:")
 
         print(
-            " -",
-            column
+            explanation_df[
+                "qa_classification"
+            ].value_counts(
+                dropna=False
+            )
         )
 
+    if "anomaly_status" in explanation_df.columns:
+
+        print()
+        print("Anomaly status distribution:")
+
+        print(
+            explanation_df[
+                "anomaly_status"
+            ].value_counts(
+                dropna=False
+            )
+        )
+
+    if "drift_status" in explanation_df.columns:
+
+        print()
+        print("Drift status distribution:")
+
+        print(
+            explanation_df[
+                "drift_status"
+            ].value_counts(
+                dropna=False
+            )
+        )
+
+    print()
+    print("=" * 70)
+
 
 # ============================================================
-# FINAL OUTPUT
+# ENTRY POINT
 # ============================================================
 
-print("\n" + "=" * 70)
-print("MODULE D COMPLETED")
-print("=" * 70)
-
-
-print(
-    "\nExplanation dataset:"
-)
-
-print(
-    OUTPUT_PATH
-)
-
-
-print(
-    "\nPriority screening list:"
-)
-
-print(
-    PRIORITY_OUTPUT_PATH
-)
-
-
-print(
-    "\nComponent reports:"
-)
-
-print(
-    REPORT_DIRECTORY
-)
-
-
-print("\n" + "=" * 70)
+if __name__ == "__main__":
+    main()
