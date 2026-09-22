@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+/*
+  Tailwind v4:
+  Use the .dark class on <html> to control dark mode.
+*/
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+html {
+  background: #f8fafc;
+}
+
+html.dark {
+  background: #020617;
+}
+
+body {
+  margin: 0;
+  background: #f8fafc;
+}
+
+html.dark body {
+  background: #020617;
+}
