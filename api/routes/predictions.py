@@ -1,14 +1,13 @@
 from fastapi import APIRouter, HTTPException
 from pathlib import Path
+
 import pandas as pd
 import numpy as np
-
-from api.services.data_service import clean_records
 
 
 router = APIRouter(
     prefix="/api/predictions",
-    tags=["Predictions"]
+    tags=["Predictions"],
 )
 
 
@@ -24,6 +23,46 @@ PREDICTION_FILE = (
     / "module_B"
     / "module_B_drift_predictions.csv"
 )
+
+
+# ============================================================
+# FORECAST FIELDS
+# ============================================================
+
+FORECAST_FIELDS = [
+    "component_id",
+    "lot_id",
+    "component_type",
+
+    "temperature",
+    "voltage",
+
+    "iddq_0h_uA",
+    "iddq_24h_uA",
+
+    "predicted_168h_uA",
+    "prediction_lower_uA",
+    "prediction_upper_uA",
+
+    "predicted_drift_uA",
+    "predicted_drift_rate",
+    "predicted_relative_drift",
+
+    "safety_slope",
+    "drift_slope_excess",
+
+    "early_drift_flag",
+    "predicted_limit_exceeded",
+    "uncertainty_adjusted_failure",
+
+    "absolute_limit_uA",
+    "limit_margin_uA",
+    "upper_bound_limit_margin_uA",
+
+    "future_drift_risk",
+    "module_b_status",
+    "module_b_explanation",
+]
 
 
 # ============================================================
@@ -71,13 +110,13 @@ def clean_value(value):
     if pd.isna(value):
         return None
 
-    if isinstance(value, (np.integer,)):
+    if isinstance(value, np.integer):
         return int(value)
 
-    if isinstance(value, (np.floating,)):
+    if isinstance(value, np.floating):
         return float(value)
 
-    if isinstance(value, (np.bool_,)):
+    if isinstance(value, np.bool_):
         return bool(value)
 
     return value
@@ -93,7 +132,6 @@ def clean_dataframe(df):
     cleaned = []
 
     for record in records:
-
         cleaned_record = {
             key: clean_value(value)
             for key, value in record.items()
@@ -102,6 +140,49 @@ def clean_dataframe(df):
         cleaned.append(cleaned_record)
 
     return cleaned
+
+
+def clean_forecast_dataframe(df):
+    """
+    Return only fields that are appropriate for
+    prospective forecast display.
+    """
+
+    available_fields = [
+        field
+        for field in FORECAST_FIELDS
+        if field in df.columns
+    ]
+
+    forecast_df = df[available_fields].copy()
+
+    return clean_dataframe(forecast_df)
+
+
+def normalize_flag(value):
+    """
+    Convert boolean-like values into 0/1.
+    """
+
+    if pd.isna(value):
+        return 0
+
+    if isinstance(value, bool):
+        return int(value)
+
+    if isinstance(value, (int, float)):
+        return int(value != 0)
+
+    return int(
+        str(value).strip().lower()
+        in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "detected",
+        }
+    )
 
 
 # ============================================================
@@ -118,21 +199,11 @@ def get_predictions(
     module_b_status: str | None = None,
 ):
     """
-    Return Module B drift predictions.
+    Return prospective Module B drift predictions.
 
-    Supports:
-
-        /api/predictions/
-
-        /api/predictions/?page=1&limit=25
-
-        /api/predictions/?component_id=C9
-
-        /api/predictions/?lot_id=L1
-
-        /api/predictions/?risk_level=HIGH
-
-        /api/predictions/?module_b_status=EARLY_DRIFT_RISK
+    Historical evaluation fields such as actual future
+    measurements and prediction error are intentionally
+    excluded from the response.
     """
 
     if page < 1:
@@ -183,7 +254,10 @@ def get_predictions(
         if "future_drift_risk" not in df.columns:
             raise HTTPException(
                 status_code=500,
-                detail="future_drift_risk column is missing from Module B output.",
+                detail=(
+                    "future_drift_risk column is missing "
+                    "from Module B output."
+                ),
             )
 
         df = df[
@@ -203,7 +277,10 @@ def get_predictions(
         if "module_b_status" not in df.columns:
             raise HTTPException(
                 status_code=500,
-                detail="module_b_status column is missing from Module B output.",
+                detail=(
+                    "module_b_status column is missing "
+                    "from Module B output."
+                ),
             )
 
         df = df[
@@ -246,7 +323,7 @@ def get_predictions(
         "page": int(page),
         "limit": int(limit),
         "pages": int(pages),
-        "data": clean_dataframe(page_df),
+        "data": clean_forecast_dataframe(page_df),
     }
 
 
@@ -259,7 +336,7 @@ def get_component_prediction(
     component_id: str,
 ):
     """
-    Return Module B prediction for one component.
+    Return prospective Module B prediction for one component.
     """
 
     df = prepare_dataframe()
@@ -275,14 +352,23 @@ def get_component_prediction(
 
         raise HTTPException(
             status_code=404,
-            detail=f"No Module B prediction found for {component_id}",
+            detail=(
+                f"No Module B prediction found for "
+                f"{component_id}"
+            ),
         )
 
     row = component_rows.iloc[0]
 
+    available_fields = [
+        field
+        for field in FORECAST_FIELDS
+        if field in row.index
+    ]
+
     prediction = {
-        key: clean_value(value)
-        for key, value in row.to_dict().items()
+        key: clean_value(row[key])
+        for key in available_fields
     }
 
     return {
@@ -298,16 +384,17 @@ def get_component_prediction(
 @router.get("/summary/overview")
 def get_prediction_summary():
     """
-    Return an overall Module B prediction summary.
+    Return an overall prospective forecast summary.
     """
 
     df = prepare_dataframe()
 
     total = len(df)
 
-    # --------------------------------------------------------
-    # Future drift risk
-    # --------------------------------------------------------
+
+    # ========================================================
+    # FUTURE DRIFT RISK
+    # ========================================================
 
     risk_counts = {}
 
@@ -325,9 +412,9 @@ def get_prediction_summary():
         }
 
 
-    # --------------------------------------------------------
-    # Module B status
-    # --------------------------------------------------------
+    # ========================================================
+    # MODULE B STATUS
+    # ========================================================
 
     status_counts = {}
 
@@ -345,47 +432,54 @@ def get_prediction_summary():
         }
 
 
-    # --------------------------------------------------------
-    # Predicted limit exceeded
-    # --------------------------------------------------------
+    # ========================================================
+    # PREDICTED LIMIT EXCEEDED
+    # ========================================================
 
     predicted_limit_exceeded = 0
 
     if "predicted_limit_exceeded" in df.columns:
 
         predicted_limit_exceeded = int(
-            pd.to_numeric(
-                df["predicted_limit_exceeded"],
-                errors="coerce"
-            )
-            .fillna(0)
-            .astype(bool)
+            df["predicted_limit_exceeded"]
+            .apply(normalize_flag)
             .sum()
         )
 
 
-    # --------------------------------------------------------
-    # Uncertainty adjusted failure
-    # --------------------------------------------------------
+    # ========================================================
+    # UNCERTAINTY ADJUSTED FAILURE
+    # ========================================================
 
     uncertainty_adjusted_failure = 0
 
     if "uncertainty_adjusted_failure" in df.columns:
 
         uncertainty_adjusted_failure = int(
-            pd.to_numeric(
-                df["uncertainty_adjusted_failure"],
-                errors="coerce"
-            )
-            .fillna(0)
-            .astype(bool)
+            df["uncertainty_adjusted_failure"]
+            .apply(normalize_flag)
             .sum()
         )
 
 
-    # --------------------------------------------------------
-    # Average predicted 168h IDDQ
-    # --------------------------------------------------------
+    # ========================================================
+    # EARLY DRIFT
+    # ========================================================
+
+    early_drift = 0
+
+    if "early_drift_flag" in df.columns:
+
+        early_drift = int(
+            df["early_drift_flag"]
+            .apply(normalize_flag)
+            .sum()
+        )
+
+
+    # ========================================================
+    # AVERAGE PREDICTED 168H IDDQ
+    # ========================================================
 
     average_predicted_168h = None
 
@@ -393,7 +487,7 @@ def get_prediction_summary():
 
         values = pd.to_numeric(
             df["predicted_168h_uA"],
-            errors="coerce"
+            errors="coerce",
         ).dropna()
 
         if not values.empty:
@@ -402,9 +496,9 @@ def get_prediction_summary():
             )
 
 
-    # --------------------------------------------------------
-    # Average predicted drift
-    # --------------------------------------------------------
+    # ========================================================
+    # AVERAGE PREDICTED DRIFT
+    # ========================================================
 
     average_predicted_drift = None
 
@@ -412,7 +506,7 @@ def get_prediction_summary():
 
         values = pd.to_numeric(
             df["predicted_drift_uA"],
-            errors="coerce"
+            errors="coerce",
         ).dropna()
 
         if not values.empty:
@@ -421,9 +515,9 @@ def get_prediction_summary():
             )
 
 
-    # --------------------------------------------------------
-    # Model information
-    # --------------------------------------------------------
+    # ========================================================
+    # MODEL INFORMATION
+    # ========================================================
 
     model_name = None
 
@@ -440,9 +534,9 @@ def get_prediction_summary():
             model_name = values[0]
 
 
-    # --------------------------------------------------------
-    # Stage
-    # --------------------------------------------------------
+    # ========================================================
+    # STAGE
+    # ========================================================
 
     stage = None
 
@@ -450,12 +544,16 @@ def get_prediction_summary():
 
         values = pd.to_numeric(
             df["module_B_stage"],
-            errors="coerce"
+            errors="coerce",
         ).dropna()
 
         if not values.empty:
             stage = int(values.max())
 
+
+    # ========================================================
+    # CUMULATIVE COMPONENTS
+    # ========================================================
 
     cumulative_components = None
 
@@ -463,11 +561,13 @@ def get_prediction_summary():
 
         values = pd.to_numeric(
             df["cumulative_component_count"],
-            errors="coerce"
+            errors="coerce",
         ).dropna()
 
         if not values.empty:
-            cumulative_components = int(values.max())
+            cumulative_components = int(
+                values.max()
+            )
 
 
     # ========================================================
@@ -483,17 +583,24 @@ def get_prediction_summary():
 
         "cumulative_components": cumulative_components,
 
-        "average_predicted_168h_uA": average_predicted_168h,
+        "average_predicted_168h_uA":
+            average_predicted_168h,
 
-        "average_predicted_drift_uA": average_predicted_drift,
+        "average_predicted_drift_uA":
+            average_predicted_drift,
 
-        "predicted_limit_exceeded": predicted_limit_exceeded,
+        "predicted_limit_exceeded":
+            predicted_limit_exceeded,
 
-        "uncertainty_adjusted_failure": (
-            uncertainty_adjusted_failure
-        ),
+        "uncertainty_adjusted_failure":
+            uncertainty_adjusted_failure,
 
-        "future_drift_risk": risk_counts,
+        "early_drift":
+            early_drift,
 
-        "module_b_status": status_counts,
+        "future_drift_risk":
+            risk_counts,
+
+        "module_b_status":
+            status_counts,
     }

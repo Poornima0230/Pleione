@@ -1,466 +1,538 @@
-from fastapi import APIRouter, HTTPException
 from pathlib import Path
 
 import pandas as pd
-import numpy as np
+from fastapi import APIRouter, HTTPException, Query
 
 
 router = APIRouter(
     prefix="/api/risk",
-    tags=["Risk Assessment"]
+    tags=["Risk"],
 )
 
 
-BASE_DIR = (
-    Path(__file__)
-    .resolve()
-    .parents[2]
-)
+# ============================================================
+# PATHS
+# ============================================================
 
+BASE_DIR = Path(__file__).resolve().parents[2]
 
 RISK_FILE = (
     BASE_DIR
     / "data"
-    / "final_risk_assessment.csv"
+    / "risk"
+    / "overall_risk_results.csv"
 )
 
 
-def clean_value(value):
+# ============================================================
+# REQUIRED COLUMNS
+# ============================================================
 
-    if value is None:
-        return None
+REQUIRED_COLUMNS = [
+    "component_id",
+    "lot_id",
+    "risk_score",
+    "qa_classification",
+    "final_decision",
+]
 
-    if isinstance(value, np.bool_):
-        return bool(value)
 
-    if isinstance(value, np.integer):
-        return int(value)
+# ============================================================
+# HELPERS
+# ============================================================
 
-    if isinstance(value, np.floating):
+def normalize_screening_decision(value) -> str:
+    """
+    Convert the backend's different decision labels into
+    the three frontend screening states:
 
-        if np.isnan(value):
-            return None
+        PASS
+        REVIEW
+        REJECT
+    """
 
-        return float(value)
+    if pd.isna(value):
+        return "PASS"
 
-    if isinstance(value, float):
+    value = str(value).strip().upper()
 
-        if pd.isna(value):
-            return None
+    if value in {
+        "REJECT",
+        "FAIL",
+        "IMMEDIATE_REVIEW",
+    }:
+        return "REJECT"
 
-        return value
+    if value in {
+        "REVIEW",
+        "MONITOR",
+        "ENHANCED_MONITORING",
+        "PRIORITY_SCREENING",
+    }:
+        return "REVIEW"
+
+    return "PASS"
+
+
+def normalize_qa_classification(value) -> str:
+    """
+    Keep the original QA classification while making
+    the returned value consistent.
+    """
+
+    if pd.isna(value):
+        return ""
+
+    return str(value).strip().upper()
+
+
+def get_risk_bucket(risk_score) -> str:
+    """
+    Convert numeric risk score into the existing
+    risk-level buckets.
+    """
 
     try:
-
-        if pd.isna(value):
-            return None
-
+        score = float(risk_score)
     except (TypeError, ValueError):
-        pass
+        return "LOW"
 
-    return value
+    if score >= 80:
+        return "CRITICAL"
 
+    if score >= 60:
+        return "HIGH"
 
-def clean_record(record):
+    if score >= 30:
+        return "MEDIUM"
 
-    cleaned = {}
-
-    for key, value in record.items():
-
-        cleaned[str(key)] = clean_value(
-            value
-        )
-
-    return cleaned
+    return "LOW"
 
 
-def load_risk_data():
+# ============================================================
+# LOAD DATA
+# ============================================================
+
+def load_risk_data() -> pd.DataFrame:
 
     if not RISK_FILE.exists():
-
         raise HTTPException(
             status_code=404,
-            detail=(
-                "Final risk assessment file "
-                "not found"
-            )
+            detail=f"Risk output file not found: {RISK_FILE}",
         )
 
     try:
-
-        df = pd.read_csv(
-            RISK_FILE
-        )
-
-    except Exception as e:
-
+        df = pd.read_csv(RISK_FILE)
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"Failed to read risk assessment: {e}"
-            )
+            detail=f"Failed to read risk output: {exc}",
         )
 
-    if "component_id" not in df.columns:
+    missing = [
+        column
+        for column in REQUIRED_COLUMNS
+        if column not in df.columns
+    ]
 
+    if missing:
         raise HTTPException(
             status_code=500,
-            detail=(
-                "component_id column is missing "
-                "from final risk assessment"
-            )
+            detail={
+                "message": "Risk output is missing required columns",
+                "missing_columns": missing,
+            },
         )
+
+    df = df.copy()
+
+    # --------------------------------------------------------
+    # Clean identifiers
+    # --------------------------------------------------------
+
+    df["component_id"] = df["component_id"].astype(str)
+    df["lot_id"] = df["lot_id"].astype(str)
+
+    # --------------------------------------------------------
+    # Numeric risk score
+    # --------------------------------------------------------
+
+    df["risk_score"] = pd.to_numeric(
+        df["risk_score"],
+        errors="coerce",
+    ).fillna(0)
+
+    # --------------------------------------------------------
+    # Original QA classification
+    # --------------------------------------------------------
+
+    df["qa_classification"] = df[
+        "qa_classification"
+    ].apply(normalize_qa_classification)
+
+    # --------------------------------------------------------
+    # Original final decision
+    # --------------------------------------------------------
+
+    df["final_decision"] = df[
+        "final_decision"
+    ].apply(
+        lambda value: ""
+        if pd.isna(value)
+        else str(value).strip().upper()
+    )
+
+    # --------------------------------------------------------
+    # Frontend-normalized screening decision
+    # --------------------------------------------------------
+
+    df["screening_decision"] = df[
+        "final_decision"
+    ].apply(normalize_screening_decision)
+
+    # --------------------------------------------------------
+    # Risk bucket
+    # --------------------------------------------------------
+
+    df["risk_bucket"] = df["risk_score"].apply(
+        get_risk_bucket
+    )
+
+    # --------------------------------------------------------
+    # One record per component
+    # --------------------------------------------------------
+
+    df = df.drop_duplicates(
+        subset=["component_id"],
+        keep="last",
+    )
 
     return df
 
 
-def build_summary(df):
+# ============================================================
+# DATAFRAME → JSON RECORDS
+# ============================================================
 
-    total = len(df)
+def dataframe_to_records(df: pd.DataFrame):
 
-    def count_value(
-        column,
-        value
-    ):
+    records = df.to_dict(orient="records")
 
-        if column not in df.columns:
-            return 0
+    cleaned_records = []
 
-        return int(
-            (
-                df[column]
-                .astype(str)
-                .str.upper()
-                == str(value).upper()
-            ).sum()
-        )
+    for record in records:
 
-    critical = count_value(
-        "final_risk_level",
-        "CRITICAL"
-    )
+        cleaned = {}
 
-    high = count_value(
-        "final_risk_level",
-        "HIGH"
-    )
+        for key, value in record.items():
 
-    medium = count_value(
-        "final_risk_level",
-        "MEDIUM"
-    )
+            if pd.isna(value):
+                cleaned[key] = None
 
-    low = count_value(
-        "final_risk_level",
-        "LOW"
-    )
+            elif hasattr(value, "item"):
+                try:
+                    cleaned[key] = value.item()
+                except Exception:
+                    cleaned[key] = value
 
-    failure_predicted = count_value(
-        "future_failure_predicted",
-        True
-    )
+            else:
+                cleaned[key] = value
 
-    early_drift = count_value(
-        "early_drift_flag",
-        True
-    )
-
-    if (
-        "risk_score" in df.columns
-        and len(df) > 0
-    ):
-
-        average_risk = float(
-            pd.to_numeric(
-                df["risk_score"],
-                errors="coerce"
+        # Make sure these are always available
+        cleaned["screening_decision"] = (
+            normalize_screening_decision(
+                cleaned.get("final_decision")
             )
-            .mean()
         )
 
-    else:
-
-        average_risk = 0.0
-
-    if (
-        "predicted_limit_exceeded"
-        in df.columns
-    ):
-
-        predicted_limit_exceeded = int(
-            pd.to_numeric(
-                df[
-                    "predicted_limit_exceeded"
-                ],
-                errors="coerce"
-            )
-            .fillna(0)
-            .astype(bool)
-            .sum()
+        cleaned["risk_bucket"] = get_risk_bucket(
+            cleaned.get("risk_score")
         )
 
-    else:
+        cleaned_records.append(cleaned)
 
-        predicted_limit_exceeded = 0
+    return cleaned_records
 
-    return {
-        "total_components": total,
 
-        "critical": critical,
-
-        "high": high,
-
-        "medium": medium,
-
-        "low": low,
-
-        "failure_predicted":
-            failure_predicted,
-
-        "early_drift":
-            early_drift,
-
-        "predicted_limit_exceeded":
-            predicted_limit_exceeded,
-
-        "average_risk":
-            round(
-                average_risk,
-                3
-            ),
-    }
-
+# ============================================================
+# GET ALL RISK RECORDS
+# ============================================================
 
 @router.get("/")
-def get_risk_assessment(
-    page: int = 1,
-    limit: int = 1000,
-    risk_level: str = "",
-    search: str = "",
-    lot_id: str = "",
+def get_risk_records(
+    page: int = Query(
+        default=1,
+        ge=1,
+        description="Page number",
+    ),
+
+    limit: int = Query(
+        default=25,
+        ge=1,
+        le=200,
+        description="Records per page",
+    ),
+
+    risk_level: str | None = Query(
+        default=None,
+        description="Filter by risk bucket",
+    ),
+
+    search: str | None = Query(
+        default=None,
+        description="Search component ID",
+    ),
+
+    lot_id: str | None = Query(
+        default=None,
+        description="Filter by lot",
+    ),
+
+    screening_decision: str | None = Query(
+        default=None,
+        description="Filter by PASS, REVIEW, or REJECT",
+    ),
 ):
 
     df = load_risk_data()
 
-    if page < 1:
-        page = 1
+    # ========================================================
+    # FILTER: RISK LEVEL
+    # ========================================================
 
-    if limit < 1:
-        limit = 100
+    if risk_level:
 
-    if limit > 5000:
-        limit = 5000
+        normalized_risk = risk_level.strip().upper()
 
-    filtered = df.copy()
+        valid_risk_levels = {
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "CRITICAL",
+        }
 
+        if normalized_risk in valid_risk_levels:
 
-    # -----------------------------------------------------
-    # Search
-    # -----------------------------------------------------
-
-    if search.strip():
-
-        search_value = (
-            search
-            .strip()
-            .lower()
-        )
-
-        component_match = (
-            filtered[
-                "component_id"
+            df = df[
+                df["risk_bucket"] == normalized_risk
             ]
-            .astype(str)
+
+    # ========================================================
+    # FILTER: SEARCH
+    # ========================================================
+
+    if search:
+
+        search_value = search.strip().lower()
+
+        df = df[
+            df["component_id"]
             .str.lower()
             .str.contains(
                 search_value,
-                na=False
+                na=False,
             )
-        )
-
-        if "lot_id" in filtered.columns:
-
-            lot_match = (
-                filtered[
-                    "lot_id"
-                ]
-                .astype(str)
-                .str.lower()
-                .str.contains(
-                    search_value,
-                    na=False
-                )
-            )
-
-            filtered = filtered[
-                component_match
-                | lot_match
-            ]
-
-        else:
-
-            filtered = filtered[
-                component_match
-            ]
-
-
-    # -----------------------------------------------------
-    # Risk level
-    # -----------------------------------------------------
-
-    if (
-        risk_level.strip()
-        and
-        "final_risk_level"
-        in filtered.columns
-    ):
-
-        filtered = filtered[
-            filtered[
-                "final_risk_level"
-            ]
-            .astype(str)
-            .str.upper()
-            ==
-            risk_level
-            .strip()
-            .upper()
         ]
 
+    # ========================================================
+    # FILTER: LOT
+    # ========================================================
 
-    # -----------------------------------------------------
-    # Lot
-    # -----------------------------------------------------
+    if lot_id:
 
-    if (
-        lot_id.strip()
-        and
-        "lot_id"
-        in filtered.columns
-    ):
-
-        filtered = filtered[
-            filtered[
-                "lot_id"
-            ]
-            .astype(str)
-            ==
-            lot_id.strip()
+        df = df[
+            df["lot_id"].astype(str)
+            == str(lot_id)
         ]
 
+    # ========================================================
+    # FILTER: SCREENING DECISION
+    # ========================================================
 
-    # -----------------------------------------------------
-    # Highest risk first
-    # -----------------------------------------------------
+    if screening_decision:
 
-    if "risk_score" in filtered.columns:
-
-        filtered[
-            "_risk_sort"
-        ] = pd.to_numeric(
-            filtered[
-                "risk_score"
-            ],
-            errors="coerce"
+        normalized_decision = (
+            screening_decision.strip().upper()
         )
 
-        filtered = (
-            filtered
-            .sort_values(
-                "_risk_sort",
-                ascending=False
-            )
-            .drop(
-                columns=["_risk_sort"]
-            )
-        )
+        valid_decisions = {
+            "PASS",
+            "REVIEW",
+            "REJECT",
+        }
 
+        if normalized_decision in valid_decisions:
 
-    total = len(filtered)
+            df = df[
+                df["screening_decision"]
+                == normalized_decision
+            ]
 
-    start = (
-        page - 1
-    ) * limit
+    # ========================================================
+    # SORT
+    # ========================================================
 
+    df = df.sort_values(
+        by="risk_score",
+        ascending=False,
+    )
+
+    # ========================================================
+    # PAGINATION
+    # ========================================================
+
+    total = len(df)
+
+    pages = (
+        (total + limit - 1) // limit
+        if total > 0
+        else 1
+    )
+
+    start = (page - 1) * limit
     end = start + limit
 
-    page_df = filtered.iloc[
-        start:end
-    ]
+    page_df = df.iloc[start:end]
 
-
-    records = [
-        clean_record(record)
-        for record
-        in page_df.to_dict(
-            orient="records"
-        )
-    ]
-
+    records = dataframe_to_records(page_df)
 
     return {
-        "data": records,
-
-        "total": total,
-
         "page": page,
-
         "limit": limit,
-
-        "pages": (
-            (
-                total
-                + limit
-                - 1
-            )
-            // limit
-            if total
-            else 0
-        ),
-
-        "summary":
-            build_summary(df),
+        "pages": pages,
+        "total": total,
+        "records": records,
     }
 
+
+# ============================================================
+# RISK SUMMARY
+# ============================================================
 
 @router.get("/summary")
 def get_risk_summary():
 
     df = load_risk_data()
 
-    return build_summary(
-        df
+    total_components = len(df)
+
+    # --------------------------------------------------------
+    # Risk distribution
+    # --------------------------------------------------------
+
+    risk_distribution = {
+        "LOW": int(
+            (df["risk_bucket"] == "LOW").sum()
+        ),
+        "MEDIUM": int(
+            (df["risk_bucket"] == "MEDIUM").sum()
+        ),
+        "HIGH": int(
+            (df["risk_bucket"] == "HIGH").sum()
+        ),
+        "CRITICAL": int(
+            (df["risk_bucket"] == "CRITICAL").sum()
+        ),
+    }
+
+    # --------------------------------------------------------
+    # Screening distribution
+    # --------------------------------------------------------
+
+    screening_distribution = {
+        "PASS": int(
+            (
+                df["screening_decision"]
+                == "PASS"
+            ).sum()
+        ),
+
+        "REVIEW": int(
+            (
+                df["screening_decision"]
+                == "REVIEW"
+            ).sum()
+        ),
+
+        "REJECT": int(
+            (
+                df["screening_decision"]
+                == "REJECT"
+            ).sum()
+        ),
+    }
+
+    # --------------------------------------------------------
+    # Original backend decision distribution
+    #
+    # Keep this because Module C may contain MONITOR,
+    # ENHANCED_MONITORING, etc.
+    # --------------------------------------------------------
+
+    raw_decision_distribution = (
+        df["final_decision"]
+        .value_counts()
+        .to_dict()
     )
 
+    # --------------------------------------------------------
+    # Average risk
+    # --------------------------------------------------------
+
+    average_risk_score = (
+        float(df["risk_score"].mean())
+        if total_components > 0
+        else 0.0
+    )
+
+    return {
+        "total_components": total_components,
+
+        "average_risk_score": round(
+            average_risk_score,
+            2,
+        ),
+
+        "risk_distribution": risk_distribution,
+
+        "screening_distribution": (
+            screening_distribution
+        ),
+
+        "raw_decision_distribution": (
+            raw_decision_distribution
+        ),
+    }
+
+
+# ============================================================
+# SINGLE COMPONENT RISK
+# ============================================================
 
 @router.get("/{component_id}")
 def get_component_risk(
-    component_id: str
+    component_id: str,
 ):
 
     df = load_risk_data()
 
-    result = df[
-        df[
-            "component_id"
-        ]
-        .astype(str)
-        ==
-        str(component_id)
+    component_df = df[
+        df["component_id"].astype(str)
+        == str(component_id)
     ]
 
-    if result.empty:
+    if component_df.empty:
 
         raise HTTPException(
             status_code=404,
             detail=(
-                f"Risk assessment for "
-                f"{component_id} was not found"
-            )
+                f"Risk data not found for "
+                f"component {component_id}"
+            ),
         )
 
-    record = result.iloc[0]
+    record = dataframe_to_records(
+        component_df.iloc[:1]
+    )[0]
 
-    return clean_record(
-        record.to_dict()
-    )
+    return record

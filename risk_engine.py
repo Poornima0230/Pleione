@@ -1,69 +1,143 @@
-import os
+"""
+PLEIONE - MODULE C
+Risk Fusion & Early Screening
+
+SIH 26170
+AI-Driven Anomaly Detection in Component Burn-In & Screening
+
+Module C combines:
+    Module A -> observed anomaly evidence
+    Module B -> predicted drift / future risk
+    Specification -> current and predicted limit evidence
+
+Important:
+    ground_truth is evaluation-only.
+    It is NEVER used to calculate risk, score, or screening decision.
+"""
+
+from pathlib import Path
 import json
-import math
-import pandas as pd
+import warnings
+
 import numpy as np
-
-
-# ============================================================
-# PLEIONE
-# CONFIGURABLE RISK SCORING AND QA POLICY ENGINE
-# ============================================================
+import pandas as pd
 
 
 # ============================================================
 # PATHS
 # ============================================================
 
-MODULE_A_DIR = "data/module_A_results"
+BASE_DIR = Path(__file__).resolve().parent
 
-MODULE_B_PATH = (
-    "data/module_B/module_B_drift_predictions.csv"
-)
+MODULE_A_DIR = BASE_DIR / "data" / "module_A_results"
+MODULE_B_FILE = BASE_DIR / "data" / "module_B" / "module_B_drift_predictions.csv"
 
-CONFIG_PATH = "risk_config.json"
+RISK_DIR = BASE_DIR / "data" / "risk"
+RISK_DIR.mkdir(parents=True, exist_ok=True)
 
-OUTPUT_DIR = "data/risk"
-
-SUMMARY_PATH = os.path.join(
-    OUTPUT_DIR,
-    "risk_stage_summary.csv"
-)
-
-OVERALL_OUTPUT_PATH = os.path.join(
-    OUTPUT_DIR,
-    "overall_risk_results.csv"
-)
+CONFIG_FILE = BASE_DIR / "risk_config.json"
 
 
 # ============================================================
-# IMPORTANT PIPELINE LIMIT
+# DEFAULT CONFIGURATION
 # ============================================================
 
-# Module A currently has stages 1-10.
-#
-# Module B currently contains predictions for 10,000
-# components, which corresponds to cumulative stages 1-5.
-#
-# Therefore the risk engine must stop at stage 5.
-#
-# Stage 6-10 of Module A are intentionally ignored until
-# corresponding Module B predictions are available.
-
-MAX_SUPPORTED_STAGE = 5
+DEFAULT_CONFIG = {
+    "weights": {
+        "anomaly": 0.30,
+        "drift": 0.25,
+        "future": 0.30,
+        "specification": 0.15,
+    },
+    "thresholds": {
+        "medium": 30.0,
+        "high": 60.0,
+        "critical": 80.0,
+    },
+}
 
 
 # ============================================================
-# BASIC HELPERS
+# CONFIGURATION
 # ============================================================
 
-def safe_float(value, default=0.0):
+def load_config():
+    """
+    Load risk configuration.
+
+    If risk_config.json does not exist or contains invalid data,
+    the default configuration is used.
+    """
+
+    config = DEFAULT_CONFIG.copy()
+
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                user_config = json.load(f)
+
+            if "weights" in user_config:
+                config["weights"].update(user_config["weights"])
+
+            if "thresholds" in user_config:
+                config["thresholds"].update(user_config["thresholds"])
+
+        except Exception as exc:
+            warnings.warn(
+                f"Could not load {CONFIG_FILE}: {exc}. "
+                "Using default configuration."
+            )
+
+    # Normalize weights so accidental config errors do not
+    # change the intended relative contribution.
+    weights = config["weights"]
+
+    total_weight = sum(float(v) for v in weights.values())
+
+    if total_weight <= 0:
+        config["weights"] = DEFAULT_CONFIG["weights"].copy()
+    else:
+        for key in weights:
+            weights[key] = float(weights[key]) / total_weight
+
+    return config
+
+
+CONFIG = load_config()
+
+WEIGHTS = CONFIG["weights"]
+THRESHOLDS = CONFIG["thresholds"]
+
+
+# ============================================================
+# UTILITY FUNCTIONS
+# ============================================================
+
+def clip01(value):
+    """
+    Clamp a scalar to [0, 1].
+    """
+
+    if value is None:
+        return 0.0
 
     try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
-        if pd.isna(value):
-            return default
+    if not np.isfinite(value):
+        return 0.0
 
+    return float(np.clip(value, 0.0, 1.0))
+
+
+def safe_float(value, default=0.0):
+    """
+    Convert a value safely to float.
+    """
+
+    try:
         value = float(value)
 
         if not np.isfinite(value):
@@ -71,215 +145,128 @@ def safe_float(value, default=0.0):
 
         return value
 
-    except (ValueError, TypeError):
-
+    except (TypeError, ValueError):
         return default
 
 
-def clamp(
-    value,
-    minimum=0.0,
-    maximum=1.0
-):
+def normalize_flag(value):
+    """
+    Safely convert common boolean representations to bool.
+    """
 
-    return max(
-        minimum,
-        min(maximum, value)
-    )
+    if isinstance(value, bool):
+        return value
 
+    if pd.isna(value):
+        return False
 
-def normalize_component_id(series):
+    if isinstance(value, (int, float)):
+        return bool(value)
 
-    return (
-        series
-        .astype(str)
-        .str.strip()
-    )
+    value = str(value).strip().lower()
 
-
-# ============================================================
-# LOAD CONFIGURATION
-# ============================================================
-
-def load_config():
-
-    if not os.path.exists(CONFIG_PATH):
-
-        raise FileNotFoundError(
-            f"Configuration file not found: "
-            f"{CONFIG_PATH}"
-        )
-
-    with open(
-        CONFIG_PATH,
-        "r",
-        encoding="utf-8"
-    ) as file:
-
-        config = json.load(file)
-
-    validate_config(config)
-
-    return config
-
-
-# ============================================================
-# VALIDATE CONFIGURATION
-# ============================================================
-
-def validate_config(config):
-
-    if "risk_calculation" not in config:
-
-        raise ValueError(
-            "Config must contain "
-            "'risk_calculation'."
-        )
-
-    if "weights" not in config[
-        "risk_calculation"
-    ]:
-
-        raise ValueError(
-            "Config must contain "
-            "risk_calculation.weights."
-        )
-
-    required_weights = [
+    return value in {
+        "true",
+        "1",
+        "yes",
+        "y",
         "anomaly",
-        "drift",
-        "future",
-        "specification"
-    ]
+        "flagged",
+    }
 
-    weights = config[
-        "risk_calculation"
-    ][
-        "weights"
-    ]
 
-    for key in required_weights:
+def percentile_position(value, median, q95):
+    """
+    Distribution-based calibration.
 
-        if key not in weights:
+    median -> 0
+    q95    -> 1
 
-            raise ValueError(
-                f"Missing risk weight: {key}"
-            )
+    Values between them are scaled smoothly.
 
-        if safe_float(
-            weights[key]
-        ) < 0:
+    This is preferable to arbitrary hard-coded thresholds because
+    Module B's output distribution is learned from the actual data.
+    """
 
-            raise ValueError(
-                f"Risk weight cannot be "
-                f"negative: {key}"
-            )
+    value = safe_float(value)
 
-    weight_sum = sum(
-        safe_float(
-            weights[key]
-        )
-        for key in required_weights
-    )
+    median = safe_float(median)
+    q95 = safe_float(q95)
 
-    if weight_sum <= 0:
+    if q95 <= median:
+        return 1.0 if value > median else 0.0
 
-        raise ValueError(
-            "At least one risk weight "
-            "must be greater than zero."
-        )
+    if value <= median:
+        return 0.0
 
-    if "qa_policy" not in config:
+    if value >= q95:
+        return 1.0
 
-        raise ValueError(
-            "Config must contain "
-            "'qa_policy'."
-        )
+    return clip01((value - median) / (q95 - median))
 
-    if "classifications" not in config[
-        "qa_policy"
-    ]:
 
-        raise ValueError(
-            "qa_policy must contain "
-            "classifications."
-        )
+def risk_level_from_score(score):
+    """
+    Convert numerical risk score to risk level.
+    """
 
-    classifications = config[
-        "qa_policy"
-    ][
-        "classifications"
-    ]
+    score = safe_float(score)
 
-    if not classifications:
+    if score >= THRESHOLDS["critical"]:
+        return "CRITICAL"
 
-        raise ValueError(
-            "At least one QA classification "
-            "is required."
-        )
+    if score >= THRESHOLDS["high"]:
+        return "HIGH"
 
-    for classification in classifications:
+    if score >= THRESHOLDS["medium"]:
+        return "MEDIUM"
 
-        if "name" not in classification:
-
-            raise ValueError(
-                "Every classification needs "
-                "a name."
-            )
-
-        if "min_risk" not in classification:
-
-            raise ValueError(
-                f"Missing min_risk for "
-                f"{classification['name']}"
-            )
-
-        if "max_risk" not in classification:
-
-            raise ValueError(
-                f"Missing max_risk for "
-                f"{classification['name']}"
-            )
+    return "LOW"
 
 
 # ============================================================
-# VALIDATE MODULE A
+# MODULE A VALIDATION
 # ============================================================
 
-def validate_module_a(
-    df,
-    filename
-):
+def validate_module_a(df, path):
+    """
+    Validate the ACTUAL Module A schema.
+
+    Current Module A provides:
+
+        component_id
+        component_type
+        combined_anomaly_score
+        anomaly_flag
+        statistical_score
+        statistical_anomaly_flag
+        isolation_forest_score
+        isolation_forest_flag
+        absolute_limit_uA
+        iddq_0h_uA
+
+    Module A does NOT currently provide:
+
+        temporal_anomaly_score
+        temporal_anomaly_flag
+        statistical_evidence_count
+        limit_violation
+        limit_excess_uA
+
+    Therefore those values are derived inside Module C.
+    """
 
     required_columns = [
-
         "component_id",
-
         "component_type",
-
         "combined_anomaly_score",
-
         "anomaly_flag",
-
         "statistical_score",
-
         "statistical_anomaly_flag",
-
-        "temporal_anomaly_score",
-
-        "temporal_anomaly_flag",
-
         "isolation_forest_score",
-
         "isolation_forest_flag",
-
-        "statistical_evidence_count",
-
-        "limit_violation",
-
-        "limit_excess_uA",
-
-        "absolute_limit_uA"
+        "absolute_limit_uA",
+        "iddq_0h_uA",
     ]
 
     missing = [
@@ -289,55 +276,71 @@ def validate_module_a(
     ]
 
     if missing:
-
         raise ValueError(
-            f"\nModule A file "
-            f"'{filename}' is missing columns:\n"
-            +
-            "\n".join(
-                f"  - {column}"
-                for column in missing
-            )
+            f"Module A file {path} is missing required columns:\n"
+            + "\n".join(f" - {column}" for column in missing)
         )
+
+    numeric_columns = [
+        "combined_anomaly_score",
+        "statistical_score",
+        "isolation_forest_score",
+        "absolute_limit_uA",
+        "iddq_0h_uA",
+    ]
+
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
+
+    invalid_numeric = [
+        column
+        for column in numeric_columns
+        if df[column].isna().any()
+    ]
+
+    if invalid_numeric:
+        raise ValueError(
+            f"Module A file {path} contains invalid numeric values:\n"
+            + "\n".join(f" - {column}" for column in invalid_numeric)
+        )
+
+    boolean_columns = [
+        "anomaly_flag",
+        "statistical_anomaly_flag",
+        "isolation_forest_flag",
+    ]
+
+    for column in boolean_columns:
+        df[column] = df[column].apply(normalize_flag)
+
+    return df
 
 
 # ============================================================
-# VALIDATE MODULE B
+# MODULE B VALIDATION
 # ============================================================
 
 def validate_module_b(df):
+    """
+    Validate Module B prediction data.
+    """
 
     required_columns = [
-
         "component_id",
-
-        "component_type",
-
-        "predicted_168h_uA",
-
-        "prediction_lower_uA",
-
-        "prediction_upper_uA",
-
-        "predicted_drift_uA",
-
         "predicted_drift_rate",
-
         "predicted_relative_drift",
-
         "drift_slope_excess",
-
+        "predicted_168h_uA",
+        "prediction_lower_uA",
+        "prediction_upper_uA",
         "early_drift_flag",
-
-        "predicted_limit_exceeded",
-
         "uncertainty_adjusted_failure",
-
-        "limit_margin_uA",
-
-        "upper_bound_limit_margin_uA",
-
-        "future_drift_risk"
+        "predicted_limit_exceeded",
+        "future_drift_risk",
+        "module_b_status",
     ]
 
     missing = [
@@ -347,1350 +350,1350 @@ def validate_module_b(df):
     ]
 
     if missing:
-
         raise ValueError(
-            "\nModule B is missing columns:\n"
-            +
-            "\n".join(
-                f"  - {column}"
-                for column in missing
-            )
+            "Module B is missing required columns:\n"
+            + "\n".join(f" - {column}" for column in missing)
         )
+
+    numeric_columns = [
+        "predicted_drift_rate",
+        "predicted_relative_drift",
+        "drift_slope_excess",
+        "predicted_168h_uA",
+        "prediction_lower_uA",
+        "prediction_upper_uA",
+    ]
+
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
+
+    for column in [
+        "early_drift_flag",
+        "uncertainty_adjusted_failure",
+        "predicted_limit_exceeded",
+    ]:
+        df[column] = df[column].apply(normalize_flag)
+
+    return df
 
 
 # ============================================================
-# MODULE A
-# ANOMALY RISK FACTOR
+# MODULE B CALIBRATION
+# ============================================================
+
+def calculate_module_b_calibration(module_b):
+    """
+    Learn drift reference points from Module B itself.
+
+    We use:
+        median -> normal/reference region
+        q95    -> strong drift region
+
+    This avoids arbitrary universal thresholds.
+    """
+
+    calibration = {}
+
+    columns = [
+        "predicted_drift_rate",
+        "predicted_relative_drift",
+        "drift_slope_excess",
+    ]
+
+    print("\nModule B drift calibration:")
+
+    for column in columns:
+        values = pd.to_numeric(
+            module_b[column],
+            errors="coerce",
+        ).dropna()
+
+        if len(values) == 0:
+            median = 0.0
+            q95 = 1.0
+        else:
+            median = float(values.median())
+            q95 = float(values.quantile(0.95))
+
+        calibration[column] = {
+            "median": median,
+            "q95": q95,
+        }
+
+        print(
+            f"  {column}: "
+            f"median={median:.6f}, "
+            f"q95={q95:.6f}"
+        )
+
+    return calibration
+
+
+# ============================================================
+# MODULE A ANOMALY FACTOR
 # ============================================================
 
 def calculate_anomaly_factor(row):
+    """
+    Calculate Module A anomaly evidence.
 
-    combined_score = clamp(
-        safe_float(
-            row[
-                "combined_anomaly_score"
-            ]
-        )
+    Current available evidence:
+
+        1. combined anomaly score
+        2. statistical detector
+        3. isolation forest detector
+        4. detector agreement
+
+    There is intentionally NO artificial anomaly floor.
+
+    A component is not automatically considered risky merely because
+    anomaly_flag is True. The actual evidence strength matters.
+    """
+
+    combined_score = clip01(
+        row.get("combined_anomaly_score", 0.0)
     )
 
-    anomaly_flag = safe_float(
-        row[
-            "anomaly_flag"
-        ]
+    statistical_score = clip01(
+        row.get("statistical_score", 0.0)
     )
 
-    evidence_count = safe_float(
-        row[
-            "statistical_evidence_count"
-        ]
+    isolation_score = clip01(
+        row.get("isolation_forest_score", 0.0)
     )
 
-    statistical_flag = safe_float(
-        row[
-            "statistical_anomaly_flag"
-        ]
+    statistical_flag = normalize_flag(
+        row.get("statistical_anomaly_flag", False)
     )
 
-    temporal_flag = safe_float(
-        row[
-            "temporal_anomaly_flag"
-        ]
+    isolation_flag = normalize_flag(
+        row.get("isolation_forest_flag", False)
     )
 
-    isolation_flag = safe_float(
-        row[
-            "isolation_forest_flag"
-        ]
+    anomaly_flag = normalize_flag(
+        row.get("anomaly_flag", False)
     )
 
-    # --------------------------------------------------------
-    # Combined anomaly score is the primary anomaly signal.
-    #
-    # The individual detector flags are supporting evidence.
-    #
-    # We deliberately do not give every detector an independent
-    # full weight because that would double-count correlated
-    # anomaly evidence.
-    # --------------------------------------------------------
+    detector_average = (
+        statistical_score + isolation_score
+    ) / 2.0
 
-    evidence_strength = clamp(
-        evidence_count / 3.0
+    evidence_count = (
+        int(statistical_flag)
+        + int(isolation_flag)
     )
 
-    supporting_flags = (
-        statistical_flag
-        +
-        temporal_flag
-        +
-        isolation_flag
+    if evidence_count == 2:
+        agreement_factor = 1.0
+    elif evidence_count == 1:
+        agreement_factor = 0.50
+    else:
+        agreement_factor = 0.0
+
+    factor = (
+        0.60 * combined_score
+        + 0.25 * detector_average
+        + 0.15 * agreement_factor
     )
 
-    supporting_strength = clamp(
-        supporting_flags / 3.0
-    )
+    # The anomaly flag is used as supporting evidence only.
+    # It does not force the score upward.
+    if anomaly_flag:
+        factor = max(factor, combined_score * 0.90)
 
-    anomaly_factor = (
-
-        0.70
-        * combined_score
-
-        +
-
-        0.20
-        * evidence_strength
-
-        +
-
-        0.10
-        * supporting_strength
-    )
-
-    # If Module A explicitly marked an anomaly,
-    # maintain a meaningful minimum anomaly contribution.
-
-    if anomaly_flag >= 1:
-
-        anomaly_factor = max(
-            anomaly_factor,
-            0.60
-        )
-
-    return clamp(
-        anomaly_factor
-    )
+    return clip01(factor), evidence_count
 
 
 # ============================================================
-# MODULE B
-# DRIFT RISK FACTOR
+# MODULE B DRIFT FACTOR
 # ============================================================
 
-def calculate_drift_factor(
-    row,
-    config
-):
+def calculate_drift_factor(row, calibration):
+    """
+    Calculate current drift evidence from Module B.
 
-    predicted_drift_rate = abs(
-        safe_float(
-            row[
-                "predicted_drift_rate"
-            ]
-        )
+    Components:
+
+        predicted_drift_rate
+        predicted_relative_drift
+        drift_slope_excess
+        early_drift_flag
+
+    Negative drift values do not create positive risk.
+    """
+
+    drift_rate = max(
+        0.0,
+        safe_float(row.get("predicted_drift_rate", 0.0)),
     )
 
-    predicted_relative_drift = abs(
-        safe_float(
-            row[
-                "predicted_relative_drift"
-            ]
-        )
+    relative_drift = max(
+        0.0,
+        safe_float(row.get("predicted_relative_drift", 0.0)),
     )
 
-    drift_slope_excess = abs(
-        safe_float(
-            row[
-                "drift_slope_excess"
-            ]
-        )
+    slope_excess = max(
+        0.0,
+        safe_float(row.get("drift_slope_excess", 0.0)),
     )
 
-    early_drift_flag = safe_float(
-        row[
-            "early_drift_flag"
-        ]
+    early_flag = normalize_flag(
+        row.get("early_drift_flag", False)
     )
 
-    # --------------------------------------------------------
-    # Convert drift measurements into bounded values.
-    # --------------------------------------------------------
-
-    rate_factor = (
-        1.0
-        -
-        math.exp(
-            -predicted_drift_rate
-        )
+    rate_factor = percentile_position(
+        drift_rate,
+        calibration["predicted_drift_rate"]["median"],
+        calibration["predicted_drift_rate"]["q95"],
     )
 
-    relative_factor = (
-        1.0
-        -
-        math.exp(
-            -predicted_relative_drift
-        )
+    relative_factor = percentile_position(
+        relative_drift,
+        calibration["predicted_relative_drift"]["median"],
+        calibration["predicted_relative_drift"]["q95"],
     )
 
-    slope_factor = (
-        1.0
-        -
-        math.exp(
-            -drift_slope_excess
-        )
+    slope_factor = percentile_position(
+        slope_excess,
+        calibration["drift_slope_excess"]["median"],
+        calibration["drift_slope_excess"]["q95"],
     )
+
+    # Early flag is supporting evidence, not a full risk score.
+    early_support = 0.35 if early_flag else 0.0
 
     drift_factor = (
-
-        0.45
-        * rate_factor
-
-        +
-
-        0.30
-        * relative_factor
-
-        +
-
-        0.15
-        * slope_factor
-
-        +
-
-        0.10
-        * early_drift_flag
+        0.40 * rate_factor
+        + 0.35 * relative_factor
+        + 0.20 * slope_factor
+        + 0.05 * early_support
     )
 
-    return clamp(
-        drift_factor
+    return (
+        clip01(drift_factor),
+        rate_factor,
+        relative_factor,
+        slope_factor,
+        early_support,
     )
 
 
 # ============================================================
-# MODULE B
 # FUTURE RISK FACTOR
 # ============================================================
 
-def calculate_future_factor(
-    row,
-    config
-):
+def calculate_future_factor(row, limit):
+    """
+    Calculate future risk using Module B predictions.
 
-    predicted_value = safe_float(
-        row[
-            "predicted_168h_uA"
-        ]
+    Evidence:
+
+        - predicted 168h current-to-limit ratio
+        - upper prediction bound vs limit
+        - categorical future risk
+        - direct predicted limit exceedance
+        - uncertainty-adjusted failure
+
+    Important:
+        A categorical HIGH label alone does NOT create an automatic
+        reject or strong-future condition.
+    """
+
+    predicted = safe_float(
+        row.get("predicted_168h_uA", 0.0)
     )
 
-    lower_value = safe_float(
-        row[
-            "prediction_lower_uA"
-        ]
+    upper = safe_float(
+        row.get("prediction_upper_uA", 0.0)
     )
 
-    upper_value = safe_float(
-        row[
-            "prediction_upper_uA"
-        ]
+    direct_exceedance = normalize_flag(
+        row.get("predicted_limit_exceeded", False)
     )
 
-    # lower_value is retained as part of the prediction
-    # evidence, even though upper-bound uncertainty is the
-    # safety-relevant direction for this risk calculation.
-
-    _ = lower_value
-
-    absolute_limit = safe_float(
-        row.get(
-            "absolute_limit_uA",
-            config
-            .get(
-                "risk_limits",
-                {}
-            )
-            .get(
-                "default_absolute_limit_uA",
-                50.0
-            )
-        )
+    uncertainty_failure = normalize_flag(
+        row.get("uncertainty_adjusted_failure", False)
     )
 
-    if absolute_limit <= 0:
+    future_risk = str(
+        row.get("future_drift_risk", "LOW")
+    ).upper()
 
-        absolute_limit = safe_float(
-            config
-            .get(
-                "risk_limits",
-                {}
-            )
-            .get(
-                "default_absolute_limit_uA",
-                50.0
-            ),
-            50.0
-        )
-
-    # --------------------------------------------------------
-    # Prediction relative to safety limit.
-    # --------------------------------------------------------
-
-    predicted_ratio = (
-        predicted_value
-        /
-        absolute_limit
-    )
-
-    upper_ratio = (
-        upper_value
-        /
-        absolute_limit
-    )
-
-    watch_ratio = safe_float(
-        config
-        .get(
-            "risk_limits",
-            {}
-        )
-        .get(
-            "future_limit_watch_ratio",
-            0.80
-        ),
-        0.80
-    )
-
-    high_ratio = safe_float(
-        config
-        .get(
-            "risk_limits",
-            {}
-        )
-        .get(
-            "future_limit_high_ratio",
-            1.00
-        ),
-        1.00
-    )
-
-    # --------------------------------------------------------
-    # Predicted future-value risk.
-    # --------------------------------------------------------
-
-    if predicted_ratio >= high_ratio:
-
-        predicted_risk = 1.0
-
-    elif predicted_ratio >= watch_ratio:
-
-        predicted_risk = (
-
-            predicted_ratio
-            -
-            watch_ratio
-
-        ) / max(
-            high_ratio
-            -
-            watch_ratio,
-            0.000001
-        )
-
+    if limit <= 0:
+        point_ratio = 0.0
+        upper_ratio = 0.0
     else:
+        point_ratio = predicted / limit
+        upper_ratio = upper / limit
 
-        predicted_risk = (
-
-            predicted_ratio
-            /
-            watch_ratio
-
-        ) * 0.35
-
-    predicted_risk = clamp(
-        predicted_risk
+    # Point prediction:
+    # <80% of limit -> low
+    # 80-100% -> progressively increasing
+    # >=100% -> maximum
+    point_factor = clip01(
+        (point_ratio - 0.80) / 0.20
     )
 
-    # --------------------------------------------------------
-    # Prediction interval uncertainty.
-    # --------------------------------------------------------
-
-    if upper_ratio >= high_ratio:
-
-        uncertainty_risk = 1.0
-
-    elif upper_ratio >= watch_ratio:
-
-        uncertainty_risk = 0.60
-
-    else:
-
-        uncertainty_risk = 0.0
-
-    # --------------------------------------------------------
-    # Explicit Module B future-risk flags.
-    # --------------------------------------------------------
-
-    predicted_limit_flag = safe_float(
-        row[
-            "predicted_limit_exceeded"
-        ]
+    # Upper prediction:
+    # <80% -> low
+    # 80-110% -> progressively increasing
+    # >=110% -> maximum
+    upper_factor = clip01(
+        (upper_ratio - 0.80) / 0.30
     )
 
-    uncertainty_failure_flag = safe_float(
-        row[
-            "uncertainty_adjusted_failure"
-        ]
+    categorical_factor = {
+        "LOW": 0.00,
+        "WATCH": 0.15,
+        "MEDIUM": 0.35,
+        "HIGH": 0.55,
+        "CRITICAL": 0.75,
+    }.get(
+        future_risk,
+        0.0,
     )
 
-    future_drift_risk = clamp(
-        safe_float(
-            row[
-                "future_drift_risk"
-            ]
-        )
+    direct_factor = 1.0 if direct_exceedance else 0.0
+
+    uncertainty_factor = (
+        0.55 if uncertainty_failure else 0.0
     )
 
-    # --------------------------------------------------------
-    # Do not add correlated future flags together.
-    #
-    # Instead, use the strongest explicit future signal.
-    # --------------------------------------------------------
-
-    explicit_future_flag = max(
-
-        predicted_limit_flag,
-
-        uncertainty_failure_flag
+    future_factor = (
+        0.35 * point_factor
+        + 0.25 * upper_factor
+        + 0.10 * categorical_factor
+        + 0.20 * direct_factor
+        + 0.10 * uncertainty_factor
     )
 
-    future_factor = max(
+    upper_limit_crossed = upper_ratio >= 1.0
 
-        predicted_risk,
-
-        0.60
-        * uncertainty_risk,
-
-        0.80
-        * future_drift_risk,
-
-        explicit_future_flag
-    )
-
-    return clamp(
-        future_factor
+    return (
+        clip01(future_factor),
+        point_ratio,
+        upper_ratio,
+        upper_limit_crossed,
     )
 
 
 # ============================================================
-# MODULE A
-# SPECIFICATION RISK FACTOR
+# SPECIFICATION FACTOR
 # ============================================================
 
 def calculate_specification_factor(
-    row
+    current_value,
+    limit,
 ):
+    """
+    Calculate current specification utilization.
 
-    limit_violation = safe_float(
-        row[
-            "limit_violation"
-        ]
+    <80% of limit:
+        low specification pressure
+
+    80-100%:
+        increasing pressure
+
+    >=100%:
+        current specification violation
+    """
+
+    current_value = max(
+        0.0,
+        safe_float(current_value),
     )
 
-    limit_excess = safe_float(
-        row[
-            "limit_excess_uA"
-        ]
+    limit = safe_float(limit)
+
+    if limit <= 0:
+        return 0.0, False, 0.0
+
+    ratio = current_value / limit
+
+    factor = clip01(
+        (ratio - 0.80) / 0.20
     )
 
-    absolute_limit = safe_float(
-        row[
-            "absolute_limit_uA"
-        ]
-    )
+    violation = ratio > 1.0
 
-    # Actual specification violation = maximum specification
-    # risk contribution.
-
-    if limit_violation >= 1:
-
-        return 1.0
-
-    if absolute_limit <= 0:
-
-        return 0.0
-
-    excess_ratio = (
-        limit_excess
-        /
-        absolute_limit
-    )
-
-    return clamp(
-        excess_ratio
-    )
-
-
-# ============================================================
-# FINAL RISK FUSION
-# ============================================================
-
-def calculate_overall_risk(
-
-    anomaly_factor,
-
-    drift_factor,
-
-    future_factor,
-
-    specification_factor,
-
-    config
-):
-
-    weights = config[
-        "risk_calculation"
-    ][
-        "weights"
-    ]
-
-    anomaly_weight = safe_float(
-        weights[
-            "anomaly"
-        ]
-    )
-
-    drift_weight = safe_float(
-        weights[
-            "drift"
-        ]
-    )
-
-    future_weight = safe_float(
-        weights[
-            "future"
-        ]
-    )
-
-    specification_weight = safe_float(
-        weights[
-            "specification"
-        ]
-    )
-
-    total_weight = (
-
-        anomaly_weight
-        +
-        drift_weight
-        +
-        future_weight
-        +
-        specification_weight
-    )
-
-    if total_weight <= 0:
-
-        return 0.0
-
-    weighted_score = (
-
-        anomaly_factor
-        * anomaly_weight
-
-        +
-
-        drift_factor
-        * drift_weight
-
-        +
-
-        future_factor
-        * future_weight
-
-        +
-
-        specification_factor
-        * specification_weight
-    )
-
-    normalized_score = (
-        weighted_score
-        /
-        total_weight
+    excess = max(
+        0.0,
+        current_value - limit,
     )
 
     return (
-        clamp(
-            normalized_score
-        )
-        *
-        100.0
+        factor,
+        violation,
+        excess,
     )
 
 
 # ============================================================
-# QA POLICY CLASSIFICATION
+# DECISION EVIDENCE
 # ============================================================
 
-def classify_risk(
-    risk_score,
-    config
+def calculate_decision_evidence(
+    row,
+    calibration,
 ):
+    """
+    Calculate all evidence and final screening decision
+    for one component.
 
-    classifications = config[
-        "qa_policy"
-    ][
-        "classifications"
-    ]
+    Decision philosophy:
 
-    for classification in classifications:
+        REJECT
+            only for direct specification violation,
+            direct predicted limit exceedance, or a strong
+            convergence of independent evidence.
 
-        minimum = safe_float(
-            classification[
-                "min_risk"
-            ]
+        REVIEW
+            when meaningful anomaly/drift/future evidence exists.
+
+        PASS
+            when available evidence does not justify review.
+
+    Ground truth is never used.
+    """
+
+    # --------------------------------------------------------
+    # MODULE A
+    # --------------------------------------------------------
+
+    anomaly_factor, evidence_count = calculate_anomaly_factor(
+        row
+    )
+
+    # --------------------------------------------------------
+    # MODULE B DRIFT
+    # --------------------------------------------------------
+
+    (
+        drift_factor,
+        drift_rate_factor,
+        relative_drift_factor,
+        slope_excess_factor,
+        early_drift_support,
+    ) = calculate_drift_factor(
+        row,
+        calibration,
+    )
+
+    # --------------------------------------------------------
+    # SPECIFICATION
+    # --------------------------------------------------------
+
+    current_value = safe_float(
+        row.get("iddq_0h_uA", 0.0)
+    )
+
+    limit = safe_float(
+        row.get("absolute_limit_uA", 0.0)
+    )
+
+    (
+        specification_factor,
+        current_limit_violation,
+        current_limit_excess,
+    ) = calculate_specification_factor(
+        current_value,
+        limit,
+    )
+
+    # --------------------------------------------------------
+    # FUTURE
+    # --------------------------------------------------------
+
+    (
+        future_factor,
+        future_point_ratio,
+        future_upper_ratio,
+        upper_prediction_limit_crossed,
+    ) = calculate_future_factor(
+        row,
+        limit,
+    )
+
+    direct_future_exceedance = normalize_flag(
+        row.get("predicted_limit_exceeded", False)
+    )
+
+    uncertainty_failure = normalize_flag(
+        row.get("uncertainty_adjusted_failure", False)
+    )
+
+    # --------------------------------------------------------
+    # EVIDENCE STRENGTH
+    # --------------------------------------------------------
+
+    strong_current_anomaly = (
+        anomaly_factor >= 0.75
+        and evidence_count >= 1
+    )
+
+    medium_current_anomaly = (
+        anomaly_factor >= 0.45
+    )
+
+    strong_drift = (
+        drift_factor >= 0.75
+        or (
+            drift_rate_factor >= 0.80
+            and relative_drift_factor >= 0.80
+        )
+        or (
+            relative_drift_factor >= 0.80
+            and slope_excess_factor >= 0.80
+        )
+    )
+
+    moderate_drift = (
+        drift_factor >= 0.45
+    )
+
+    strong_future = (
+        direct_future_exceedance
+        or (
+            future_factor >= 0.75
+            and (
+                future_point_ratio >= 0.90
+                or future_upper_ratio >= 1.10
+            )
+        )
+    )
+
+    moderate_future = (
+        future_factor >= 0.45
+        or future_point_ratio >= 0.90
+        or future_upper_ratio >= 1.00
+    )
+
+    # --------------------------------------------------------
+    # RISK SCORE
+    # --------------------------------------------------------
+
+    risk_score = (
+        WEIGHTS["anomaly"] * anomaly_factor
+        + WEIGHTS["drift"] * drift_factor
+        + WEIGHTS["future"] * future_factor
+        + WEIGHTS["specification"] * specification_factor
+    ) * 100.0
+
+    risk_score = float(
+        np.clip(risk_score, 0.0, 100.0)
+    )
+
+    risk_level = risk_level_from_score(
+        risk_score
+    )
+
+    # --------------------------------------------------------
+    # REJECT LOGIC
+    # --------------------------------------------------------
+
+    # Direct current specification violation.
+    hard_current_reject = current_limit_violation
+
+    # Direct predicted future limit violation.
+    hard_future_reject = direct_future_exceedance
+
+    # Strong independent evidence converging toward future
+    # failure. This is intentionally much stricter than simply
+    # having an early_drift_flag.
+    converging_reject = (
+        strong_future
+        and (
+            strong_current_anomaly
+            or strong_drift
+        )
+        and risk_score >= 70.0
+    )
+
+    hard_reject = (
+        hard_current_reject
+        or hard_future_reject
+        or converging_reject
+    )
+
+    # --------------------------------------------------------
+    # REVIEW LOGIC
+    # --------------------------------------------------------
+
+    # Current anomaly alone can trigger review when evidence
+    # is genuinely strong.
+    review_current = (
+        strong_current_anomaly
+        or medium_current_anomaly
+    )
+
+    # Drift alone can trigger review only when the continuous
+    # evidence is meaningful. early_drift_flag by itself does
+    # NOT automatically mean REVIEW.
+    review_drift = moderate_drift
+
+    # Future evidence can trigger review when prediction
+    # approaches the specification limit.
+    review_future = moderate_future
+
+    # Risk score is a secondary aggregate signal.
+    review_score = risk_score >= THRESHOLDS["medium"]
+
+    if hard_reject:
+        decision = "REJECT"
+
+    elif (
+        review_current
+        or review_drift
+        or review_future
+        or review_score
+    ):
+        decision = "REVIEW"
+
+    else:
+        decision = "PASS"
+
+    # --------------------------------------------------------
+    # DRIVER
+    # --------------------------------------------------------
+
+    drivers = []
+
+    if current_limit_violation:
+        drivers.append("CURRENT_LIMIT_VIOLATION")
+
+    if direct_future_exceedance:
+        drivers.append("PREDICTED_LIMIT_EXCEEDANCE")
+
+    if strong_current_anomaly:
+        drivers.append("STRONG_ANOMALY_EVIDENCE")
+    elif medium_current_anomaly:
+        drivers.append("ANOMALY_EVIDENCE")
+
+    if strong_drift:
+        drivers.append("STRONG_DRIFT_EVIDENCE")
+    elif moderate_drift:
+        drivers.append("DRIFT_EVIDENCE")
+
+    if strong_future:
+        drivers.append("STRONG_FUTURE_RISK")
+    elif moderate_future:
+        drivers.append("FUTURE_RISK")
+
+    if uncertainty_failure:
+        drivers.append("UNCERTAINTY_ADJUSTED_RISK")
+
+    if not drivers:
+        drivers.append("NO_STRONG_RISK_SIGNAL")
+
+    primary_driver = drivers[0]
+
+    # --------------------------------------------------------
+    # EXPLANATION
+    # --------------------------------------------------------
+
+    if decision == "REJECT":
+
+        if current_limit_violation:
+            explanation = (
+                f"Current 0h Iddq exceeds the absolute specification "
+                f"limit by {current_limit_excess:.2f} µA."
+            )
+
+        elif direct_future_exceedance:
+            explanation = (
+                "Module B predicts the component will exceed the "
+                "absolute specification limit by 168h."
+            )
+
+        elif converging_reject:
+            explanation = (
+                "Multiple independent signals converge on elevated "
+                "future risk: strong anomaly/drift evidence together "
+                "with strong future prediction evidence."
+            )
+
+        else:
+            explanation = (
+                "The component has sufficient evidence to require "
+                "rejection."
+            )
+
+    elif decision == "REVIEW":
+
+        explanation_parts = []
+
+        if medium_current_anomaly:
+            explanation_parts.append(
+                "Module A detected anomaly evidence"
+            )
+
+        if moderate_drift:
+            explanation_parts.append(
+                "Module B indicates meaningful drift"
+            )
+
+        if moderate_future:
+            explanation_parts.append(
+                "future prediction approaches elevated risk"
+            )
+
+        if uncertainty_failure:
+            explanation_parts.append(
+                "uncertainty-adjusted future risk is elevated"
+            )
+
+        if explanation_parts:
+            explanation = (
+                "; ".join(explanation_parts)
+                + ". Further investigation is recommended."
+            )
+        else:
+            explanation = (
+                "Aggregate risk evidence exceeds the review threshold."
+            )
+
+    else:
+        explanation = (
+            "No sufficiently strong anomaly, drift, future-risk, "
+            "or specification signal was detected."
         )
 
-        maximum = safe_float(
-            classification[
-                "max_risk"
-            ]
-        )
+    # --------------------------------------------------------
+    # RETURN EVIDENCE
+    # --------------------------------------------------------
 
-        if (
-            minimum
-            <=
-            risk_score
-            <
-            maximum
-        ):
+    return {
+        "anomaly_factor": anomaly_factor,
 
-            return classification[
-                "name"
-            ]
+        "drift_factor": drift_factor,
+        "drift_rate_factor": drift_rate_factor,
+        "relative_drift_factor": relative_drift_factor,
+        "slope_excess_factor": slope_excess_factor,
+        "early_drift_support": early_drift_support,
 
-    # Handle exact 100 boundary.
+        "future_factor": future_factor,
+        "future_point_ratio": future_point_ratio,
+        "future_upper_ratio": future_upper_ratio,
+        "upper_prediction_limit_crossed": upper_prediction_limit_crossed,
 
-    for classification in classifications:
+        "specification_factor": specification_factor,
 
-        maximum = safe_float(
-            classification[
-                "max_risk"
-            ]
-        )
+        "statistical_evidence_count": evidence_count,
 
-        if (
-            risk_score
-            ==
-            maximum
-        ):
+        "current_limit_violation": current_limit_violation,
+        "current_limit_excess_uA": current_limit_excess,
 
-            return classification[
-                "name"
-            ]
+        "direct_future_exceedance": direct_future_exceedance,
+        "uncertainty_adjusted_failure": uncertainty_failure,
 
-    return "Unclassified"
+        "strong_current_anomaly": strong_current_anomaly,
+        "moderate_current_anomaly": medium_current_anomaly,
 
+        "strong_drift": strong_drift,
+        "moderate_drift": moderate_drift,
 
-# ============================================================
-# EXPLANATION
-# ============================================================
+        "strong_future": strong_future,
+        "moderate_future": moderate_future,
 
-def build_explanation(
+        "risk_score": risk_score,
+        "risk_level": risk_level,
 
-    anomaly_factor,
+        "hard_current_reject": hard_current_reject,
+        "hard_future_reject": hard_future_reject,
+        "converging_reject": converging_reject,
 
-    drift_factor,
-
-    future_factor,
-
-    specification_factor,
-
-    risk_score,
-
-    classification
-):
-
-    factors = {
-
-        "Anomaly":
-            anomaly_factor,
-
-        "Drift":
-            drift_factor,
-
-        "Future":
-            future_factor,
-
-        "Specification":
-            specification_factor
+        "decision": decision,
+        "primary_driver": primary_driver,
+        "risk_drivers": " | ".join(drivers),
+        "explanation": explanation,
     }
 
-    sorted_factors = sorted(
-
-        factors.items(),
-
-        key=lambda item:
-            item[1],
-
-        reverse=True
-    )
-
-    main_factor = sorted_factors[0]
-
-    factor_text = (
-
-        f"{main_factor[0]} evidence is the "
-        f"strongest risk contributor "
-        f"({main_factor[1] * 100:.1f}%)."
-    )
-
-    return (
-
-        f"Risk score: "
-        f"{risk_score:.2f}/100. "
-
-        f"QA classification: "
-        f"{classification}. "
-
-        f"{factor_text}"
-    )
-
 
 # ============================================================
-# PROCESS ONE CUMULATIVE STAGE
+# PROCESS ONE STAGE
 # ============================================================
 
 def process_stage(
-
-    module_a_path,
-
-    module_b_df,
-
-    config,
-
-    stage_number
+    stage_number,
+    module_b,
+    calibration,
 ):
+    """
+    Process one cumulative Module A stage.
+    """
 
-    print("\n" + "=" * 70)
-
-    print(
-        f"PROCESSING CUMULATIVE STAGE "
-        f"{stage_number}"
+    stage_file = (
+        MODULE_A_DIR
+        / f"stage_{stage_number:02d}.csv"
     )
+
+    if not stage_file.exists():
+        raise FileNotFoundError(
+            f"Module A stage file not found: {stage_file}"
+        )
 
     print("=" * 70)
-
     print(
-        f"Module A: {module_a_path}"
+        f"PROCESSING CUMULATIVE STAGE {stage_number}"
     )
+    print("=" * 70)
 
-    # --------------------------------------------------------
-    # Read cumulative Module A stage.
-    # --------------------------------------------------------
+    print(f"Module A: {stage_file}")
 
-    module_a_df = pd.read_csv(
-        module_a_path
-    )
+    module_a = pd.read_csv(stage_file)
 
-    validate_module_a(
-        module_a_df,
-        module_a_path
-    )
-
-    module_a_df[
-        "component_id"
-    ] = normalize_component_id(
-        module_a_df[
-            "component_id"
-        ]
-    )
-
-    # --------------------------------------------------------
-    # Normalize Module B IDs.
-    # --------------------------------------------------------
-
-    module_b_df[
-        "component_id"
-    ] = normalize_component_id(
-        module_b_df[
-            "component_id"
-        ]
-    )
-
-    # --------------------------------------------------------
-    # IMPORTANT:
-    #
-    # Module A stage is already cumulative.
-    #
-    # For example:
-    #
-    # stage 01 = 2,000
-    # stage 02 = 4,000
-    # stage 03 = 6,000
-    #
-    # We DO NOT combine:
-    #
-    # stage01 + stage02
-    #
-    # Instead we directly process stage02 as the cumulative
-    # 4,000-component dataset.
-    # --------------------------------------------------------
-
-    current_ids = set(
-        module_a_df[
-            "component_id"
-        ]
-    )
-
-    matching_module_b = module_b_df[
-        module_b_df[
-            "component_id"
-        ].isin(
-            current_ids
-        )
-    ].copy()
-
-    print(
-        f"Module A cumulative components: "
-        f"{len(module_a_df)}"
+    module_a = validate_module_a(
+        module_a,
+        stage_file,
     )
 
     print(
-        f"Unique Module A components: "
-        f"{module_a_df['component_id'].nunique()}"
-    )
-
-    print(
-        f"Module B matching components: "
-        f"{len(matching_module_b)}"
+        f"Module A components: {len(module_a)}"
     )
 
     # --------------------------------------------------------
-    # Remove duplicate Module B IDs.
+    # MERGE MODULE B
     # --------------------------------------------------------
 
-    duplicate_count = (
-        matching_module_b[
-            "component_id"
-        ]
+    module_b_subset = module_b.copy()
+
+    duplicate_ids = (
+        module_b_subset["component_id"]
         .duplicated()
         .sum()
     )
 
-    if duplicate_count > 0:
-
+    if duplicate_ids:
         print(
-            f"WARNING: Module B contains "
-            f"{duplicate_count} duplicate IDs."
+            f"Warning: Module B contains {duplicate_ids} "
+            "duplicate component IDs. Keeping first occurrence."
         )
 
-        matching_module_b = (
-            matching_module_b
+        module_b_subset = (
+            module_b_subset
             .drop_duplicates(
-                subset=[
-                    "component_id"
-                ],
-                keep="last"
+                subset=["component_id"],
+                keep="first",
             )
+        )
+
+    merged = module_a.merge(
+        module_b_subset,
+        on="component_id",
+        how="left",
+        suffixes=("", "_module_b"),
+        validate="one_to_one",
+    )
+
+    missing_module_b = (
+        merged["predicted_drift_rate"]
+        .isna()
+        .sum()
+    )
+
+    if missing_module_b:
+        raise ValueError(
+            f"Stage {stage_number}: "
+            f"{missing_module_b} Module A components have no "
+            "matching Module B prediction."
         )
 
     # --------------------------------------------------------
-    # Index Module B by component ID.
+    # CALCULATE DECISIONS
     # --------------------------------------------------------
 
-    module_b_indexed = (
-        matching_module_b
-        .set_index(
-            "component_id"
+    evidence_rows = []
+
+    for _, row in merged.iterrows():
+
+        evidence = calculate_decision_evidence(
+            row,
+            calibration,
         )
+
+        evidence_rows.append(evidence)
+
+    evidence_df = pd.DataFrame(
+        evidence_rows,
+        index=merged.index,
     )
 
-    result_rows = []
-
-    missing_module_b = 0
-
-    # ========================================================
-    # PROCESS EVERY COMPONENT IN CURRENT CUMULATIVE STAGE
-    # ========================================================
-
-    for _, module_a_row in (
-        module_a_df.iterrows()
-    ):
-
-        component_id = (
-            module_a_row[
-                "component_id"
-            ]
-        )
-
-        # ----------------------------------------------------
-        # Find Module B evidence.
-        # ----------------------------------------------------
-
-        if (
-            component_id
-            in
-            module_b_indexed.index
-        ):
-
-            module_b_row = (
-                module_b_indexed.loc[
-                    component_id
-                ]
-            )
-
-        else:
-
-            module_b_row = None
-
-            missing_module_b += 1
-
-        # ----------------------------------------------------
-        # 1. ANOMALY
-        # ----------------------------------------------------
-
-        anomaly_factor = (
-            calculate_anomaly_factor(
-                module_a_row
-            )
-        )
-
-        # ----------------------------------------------------
-        # 2. DRIFT + FUTURE
-        # ----------------------------------------------------
-
-        if module_b_row is not None:
-
-            drift_factor = (
-                calculate_drift_factor(
-                    module_b_row,
-                    config
-                )
-            )
-
-            future_factor = (
-                calculate_future_factor(
-                    module_b_row,
-                    config
-                )
-            )
-
-        else:
-
-            drift_factor = 0.0
-
-            future_factor = 0.0
-
-        # ----------------------------------------------------
-        # 3. SPECIFICATION
-        # ----------------------------------------------------
-
-        specification_factor = (
-            calculate_specification_factor(
-                module_a_row
-            )
-        )
-
-        # ----------------------------------------------------
-        # 4. FINAL RISK
-        # ----------------------------------------------------
-
-        risk_score = (
-            calculate_overall_risk(
-
-                anomaly_factor,
-
-                drift_factor,
-
-                future_factor,
-
-                specification_factor,
-
-                config
-            )
-        )
-
-        # ----------------------------------------------------
-        # 5. QA POLICY
-        # ----------------------------------------------------
-
-        classification = (
-            classify_risk(
-                risk_score,
-                config
-            )
-        )
-
-        # ----------------------------------------------------
-        # 6. EXPLANATION
-        # ----------------------------------------------------
-
-        explanation = (
-            build_explanation(
-
-                anomaly_factor,
-
-                drift_factor,
-
-                future_factor,
-
-                specification_factor,
-
-                risk_score,
-
-                classification
-            )
-        )
-
-        # ----------------------------------------------------
-        # BASE RESULT
-        # ----------------------------------------------------
-
-        result = {
-
-            "stage":
-                stage_number,
-
-            "component_id":
-                component_id,
-
-            "lot_id":
-                module_a_row.get(
-                    "lot_id",
-                    ""
-                ),
-
-            "component_type":
-                module_a_row.get(
-                    "component_type",
-                    ""
-                ),
-
-            "temperature_C":
-                module_a_row.get(
-                    "temperature_C",
-                    ""
-                ),
-
-            "voltage_V":
-                module_a_row.get(
-                    "voltage_V",
-                    ""
-                ),
-
-            # ==============================================
-            # RISK FACTORS
-            # ==============================================
-
-            "anomaly_factor":
-                anomaly_factor,
-
-            "drift_factor":
-                drift_factor,
-
-            "future_factor":
-                future_factor,
-
-            "specification_factor":
-                specification_factor,
-
-            # ==============================================
-            # FINAL RISK
-            # ==============================================
-
-            "risk_score":
-                risk_score,
-
-            "qa_classification":
-                classification,
-
-            "risk_explanation":
-                explanation,
-
-            # ==============================================
-            # MODULE A EVIDENCE
-            # ==============================================
-
-            "combined_anomaly_score":
-                module_a_row.get(
-                    "combined_anomaly_score",
-                    0
-                ),
-
-            "anomaly_flag":
-                module_a_row.get(
-                    "anomaly_flag",
-                    0
-                ),
-
-            "statistical_score":
-                module_a_row.get(
-                    "statistical_score",
-                    0
-                ),
-
-            "statistical_anomaly_flag":
-                module_a_row.get(
-                    "statistical_anomaly_flag",
-                    0
-                ),
-
-            "temporal_anomaly_score":
-                module_a_row.get(
-                    "temporal_anomaly_score",
-                    0
-                ),
-
-            "temporal_anomaly_flag":
-                module_a_row.get(
-                    "temporal_anomaly_flag",
-                    0
-                ),
-
-            "isolation_forest_score":
-                module_a_row.get(
-                    "isolation_forest_score",
-                    0
-                ),
-
-            "isolation_forest_flag":
-                module_a_row.get(
-                    "isolation_forest_flag",
-                    0
-                ),
-
-            "statistical_evidence_count":
-                module_a_row.get(
-                    "statistical_evidence_count",
-                    0
-                ),
-
-            "limit_violation":
-                module_a_row.get(
-                    "limit_violation",
-                    0
-                ),
-
-            "limit_excess_uA":
-                module_a_row.get(
-                    "limit_excess_uA",
-                    0
-                ),
-
-            "absolute_limit_uA":
-                module_a_row.get(
-                    "absolute_limit_uA",
-                    ""
-                )
-        }
-
-        # ----------------------------------------------------
-        # MODULE B EVIDENCE
-        # ----------------------------------------------------
-
-        if module_b_row is not None:
-
-            module_b_columns = [
-
-                "predicted_168h_uA",
-
-                "prediction_lower_uA",
-
-                "prediction_upper_uA",
-
-                "prediction_error_uA",
-
-                "absolute_prediction_error_uA",
-
-                "predicted_drift_uA",
-
-                "predicted_drift_rate",
-
-                "predicted_relative_drift",
-
-                "safety_slope",
-
-                "drift_slope_excess",
-
-                "early_drift_flag",
-
-                "predicted_limit_exceeded",
-
-                "uncertainty_adjusted_failure",
-
-                "limit_margin_uA",
-
-                "upper_bound_limit_margin_uA",
-
-                "future_drift_risk",
-
-                "module_b_status"
-            ]
-
-            for column in module_b_columns:
-
-                if column in module_b_row.index:
-
-                    result[
-                        column
-                    ] = module_b_row[
-                        column
-                    ]
-
-            result[
-                "module_b_match"
-            ] = True
-
-        else:
-
-            result[
-                "module_b_match"
-            ] = False
-
-        result_rows.append(
-            result
-        )
-
-    # ========================================================
-    # CREATE RESULT DATAFRAME
-    # ========================================================
-
-    result_df = pd.DataFrame(
-        result_rows
+    result = pd.concat(
+        [
+            merged.reset_index(drop=True),
+            evidence_df.reset_index(drop=True),
+        ],
+        axis=1,
     )
 
     # --------------------------------------------------------
-    # Highest risk first.
+    # SAVE
     # --------------------------------------------------------
 
-    result_df = (
-        result_df
-        .sort_values(
-            by="risk_score",
-            ascending=False
-        )
-        .reset_index(
-            drop=True
-        )
+    output_file = (
+        RISK_DIR
+        / f"risk_stage_{stage_number:02d}.csv"
     )
 
-    # ========================================================
-    # SAVE CURRENT STAGE
-    # ========================================================
-
-    os.makedirs(
-        OUTPUT_DIR,
-        exist_ok=True
+    result.to_csv(
+        output_file,
+        index=False,
     )
-
-    stage_output = os.path.join(
-
-        OUTPUT_DIR,
-
-        f"risk_stage_"
-        f"{stage_number:02d}.csv"
-    )
-
-    result_df.to_csv(
-        stage_output,
-        index=False
-    )
-
-    print(
-        f"\nSaved: {stage_output}"
-    )
-
-    print(
-        f"Rows written: "
-        f"{len(result_df)}"
-    )
-
-    if missing_module_b > 0:
-
-        print(
-            f"WARNING: "
-            f"{missing_module_b} components "
-            f"have no Module B prediction."
-        )
-
-    # ========================================================
-    # STAGE SUMMARY
-    # ========================================================
-
-    summary = {
-
-        "stage":
-            stage_number,
-
-        "components_processed":
-            len(result_df),
-
-        "module_b_matches":
-            int(
-                result_df[
-                    "module_b_match"
-                ].sum()
-            ),
-
-        "module_b_missing":
-            int(
-                missing_module_b
-            ),
-
-        "mean_risk_score":
-            round(
-                result_df[
-                    "risk_score"
-                ].mean(),
-                4
-            ),
-
-        "max_risk_score":
-            round(
-                result_df[
-                    "risk_score"
-                ].max(),
-                4
-            ),
-
-        "min_risk_score":
-            round(
-                result_df[
-                    "risk_score"
-                ].min(),
-                4
-            )
-    }
 
     # --------------------------------------------------------
-    # Add configurable QA counts.
+    # SUMMARY
     # --------------------------------------------------------
 
-    classification_counts = (
+    print("\nStage result:")
 
-        result_df[
-            "qa_classification"
-        ]
+    decision_counts = (
+        result["decision"]
         .value_counts()
         .to_dict()
     )
 
-    for (
-        classification,
-        count
-    ) in classification_counts.items():
-
-        safe_name = (
-
-            str(
-                classification
-            )
-            .strip()
-            .lower()
-            .replace(
-                " ",
-                "_"
-            )
-        )
-
-        summary[
-            f"qa_{safe_name}"
-        ] = int(
-            count
-        )
-
-    return (
-        result_df,
-        summary
+    risk_counts = (
+        result["risk_level"]
+        .value_counts()
+        .to_dict()
     )
+
+    print(
+        f"  PASS   : {decision_counts.get('PASS', 0)}"
+    )
+
+    print(
+        f"  REVIEW : {decision_counts.get('REVIEW', 0)}"
+    )
+
+    print(
+        f"  REJECT : {decision_counts.get('REJECT', 0)}"
+    )
+
+    print("\nRisk levels:")
+
+    print(
+        f"  LOW      : {risk_counts.get('LOW', 0)}"
+    )
+
+    print(
+        f"  MEDIUM   : {risk_counts.get('MEDIUM', 0)}"
+    )
+
+    print(
+        f"  HIGH     : {risk_counts.get('HIGH', 0)}"
+    )
+
+    print(
+        f"  CRITICAL : {risk_counts.get('CRITICAL', 0)}"
+    )
+
+    print(
+        f"\nSaved: {output_file}"
+    )
+
+    return result
+
+
+# ============================================================
+# BUILD FINAL RESULTS
+# ============================================================
+
+def build_final_results(stage_results):
+    """
+    The final stage contains all 10,000 cumulative components.
+
+    Save a clean final output.
+    """
+
+    if not stage_results:
+        raise ValueError(
+            "No stage results were generated."
+        )
+
+    final_result = stage_results[-1].copy()
+
+    final_file = (
+        RISK_DIR
+        / "overall_risk_results.csv"
+    )
+
+    final_result.to_csv(
+        final_file,
+        index=False,
+    )
+
+    return final_result
+
+
+# ============================================================
+# BUILD STAGE SUMMARY
+# ============================================================
+
+def build_stage_summary(stage_results):
+    """
+    Create a compact summary across cumulative stages.
+    """
+
+    rows = []
+
+    for stage_number, result in enumerate(
+        stage_results,
+        start=1,
+    ):
+
+        decision_counts = (
+            result["decision"]
+            .value_counts()
+            .to_dict()
+        )
+
+        risk_counts = (
+            result["risk_level"]
+            .value_counts()
+            .to_dict()
+        )
+
+        rows.append(
+            {
+                "stage": stage_number,
+                "components": len(result),
+
+                "pass": decision_counts.get(
+                    "PASS",
+                    0,
+                ),
+
+                "review": decision_counts.get(
+                    "REVIEW",
+                    0,
+                ),
+
+                "reject": decision_counts.get(
+                    "REJECT",
+                    0,
+                ),
+
+                "low_risk": risk_counts.get(
+                    "LOW",
+                    0,
+                ),
+
+                "medium_risk": risk_counts.get(
+                    "MEDIUM",
+                    0,
+                ),
+
+                "high_risk": risk_counts.get(
+                    "HIGH",
+                    0,
+                ),
+
+                "critical_risk": risk_counts.get(
+                    "CRITICAL",
+                    0,
+                ),
+
+                "mean_risk_score": result[
+                    "risk_score"
+                ].mean(),
+
+                "max_risk_score": result[
+                    "risk_score"
+                ].max(),
+
+                "current_limit_violations": result[
+                    "current_limit_violation"
+                ].sum(),
+
+                "predicted_limit_exceedances": result[
+                    "direct_future_exceedance"
+                ].sum(),
+
+                "strong_anomaly_evidence": result[
+                    "strong_current_anomaly"
+                ].sum(),
+
+                "strong_drift_evidence": result[
+                    "strong_drift"
+                ].sum(),
+
+                "strong_future_evidence": result[
+                    "strong_future"
+                ].sum(),
+            }
+        )
+
+    summary = pd.DataFrame(rows)
+
+    summary_file = (
+        RISK_DIR
+        / "risk_stage_summary.csv"
+    )
+
+    summary.to_csv(
+        summary_file,
+        index=False,
+    )
+
+    return summary
+
+
+# ============================================================
+# FINAL VALIDATION
+# ============================================================
+
+def validate_final_result(result):
+    """
+    Validate the final Module C result.
+    """
+
+    required_columns = [
+        "component_id",
+        "risk_score",
+        "risk_level",
+        "decision",
+        "anomaly_factor",
+        "drift_factor",
+        "future_factor",
+        "specification_factor",
+        "current_limit_violation",
+        "direct_future_exceedance",
+        "explanation",
+    ]
+
+    missing = [
+        column
+        for column in required_columns
+        if column not in result.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            "Final Module C output is missing columns:\n"
+            + "\n".join(f" - {column}" for column in missing)
+        )
+
+    if result["component_id"].duplicated().any():
+        raise ValueError(
+            "Final Module C output contains duplicate component IDs."
+        )
+
+    if result["risk_score"].isna().any():
+        raise ValueError(
+            "Final Module C output contains missing risk scores."
+        )
+
+    if (
+        (result["risk_score"] < 0)
+        | (result["risk_score"] > 100)
+    ).any():
+        raise ValueError(
+            "Risk scores must remain between 0 and 100."
+        )
+
+    valid_risk_levels = {
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL",
+    }
+
+    invalid_risk_levels = set(
+        result["risk_level"].dropna().unique()
+    ) - valid_risk_levels
+
+    if invalid_risk_levels:
+        raise ValueError(
+            f"Invalid risk levels: {invalid_risk_levels}"
+        )
+
+    valid_decisions = {
+        "PASS",
+        "REVIEW",
+        "REJECT",
+    }
+
+    invalid_decisions = set(
+        result["decision"].dropna().unique()
+    ) - valid_decisions
+
+    if invalid_decisions:
+        raise ValueError(
+            f"Invalid decisions: {invalid_decisions}"
+        )
+
+    # Direct predicted limit exceedance must always result
+    # in rejection.
+    invalid_direct_future_decisions = result[
+        result["direct_future_exceedance"]
+        & (result["decision"] != "REJECT")
+    ]
+
+    if len(invalid_direct_future_decisions) > 0:
+        raise ValueError(
+            "Validation failed: direct predicted limit "
+            "exceedance is not marked REJECT."
+        )
+
+    # Direct current limit violation must always result
+    # in rejection.
+    invalid_current_decisions = result[
+        result["current_limit_violation"]
+        & (result["decision"] != "REJECT")
+    ]
+
+    if len(invalid_current_decisions) > 0:
+        raise ValueError(
+            "Validation failed: current specification violation "
+            "is not marked REJECT."
+        )
+
+    print("\nFinal validation: PASSED")
+
+
+# ============================================================
+# PRINT FINAL REPORT
+# ============================================================
+
+def print_final_report(result):
+    """
+    Print final Module C statistics.
+    """
+
+    print("\n")
+    print("=" * 70)
+    print("PLEIONE MODULE C FINAL REPORT")
+    print("=" * 70)
+
+    print(
+        f"Total components : {len(result)}"
+    )
+
+    print("\nScreening decisions:")
+
+    decisions = (
+        result["decision"]
+        .value_counts()
+    )
+
+    for decision in [
+        "PASS",
+        "REVIEW",
+        "REJECT",
+    ]:
+
+        count = int(
+            decisions.get(
+                decision,
+                0,
+            )
+        )
+
+        percentage = (
+            count / len(result) * 100
+            if len(result)
+            else 0
+        )
+
+        print(
+            f"  {decision:<7}: "
+            f"{count:>5} "
+            f"({percentage:6.2f}%)"
+        )
+
+    print("\nRisk levels:")
+
+    risks = (
+        result["risk_level"]
+        .value_counts()
+    )
+
+    for level in [
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL",
+    ]:
+
+        count = int(
+            risks.get(
+                level,
+                0,
+            )
+        )
+
+        percentage = (
+            count / len(result) * 100
+            if len(result)
+            else 0
+        )
+
+        print(
+            f"  {level:<9}: "
+            f"{count:>5} "
+            f"({percentage:6.2f}%)"
+        )
+
+    print("\nEvidence:")
+
+    print(
+        f"  Current limit violations : "
+        f"{int(result['current_limit_violation'].sum())}"
+    )
+
+    print(
+        f"  Predicted limit exceeds  : "
+        f"{int(result['direct_future_exceedance'].sum())}"
+    )
+
+    print(
+        f"  Strong anomaly evidence  : "
+        f"{int(result['strong_current_anomaly'].sum())}"
+    )
+
+    print(
+        f"  Strong drift evidence    : "
+        f"{int(result['strong_drift'].sum())}"
+    )
+
+    print(
+        f"  Strong future evidence   : "
+        f"{int(result['strong_future'].sum())}"
+    )
+
+    uncertainty_count = (
+    result["uncertainty_adjusted_failure"]
+    .loc[:, ~result["uncertainty_adjusted_failure"].columns.duplicated()]
+    .iloc[:, 0]
+    .sum()
+    if isinstance(result["uncertainty_adjusted_failure"], pd.DataFrame)
+    else result["uncertainty_adjusted_failure"].sum()
+    )
+
+    print(
+    f"  Uncertainty-adjusted risk: "
+    f"{int(uncertainty_count)}"
+    )
+
+    print("\nRisk score:")
+
+    print(
+        f"  Mean : {result['risk_score'].mean():.2f}"
+    )
+
+    print(
+        f"  Max  : {result['risk_score'].max():.2f}"
+    )
+
+    print(
+        f"  Min  : {result['risk_score'].min():.2f}"
+    )
+
+    print("=" * 70)
 
 
 # ============================================================
@@ -1699,394 +1702,150 @@ def process_stage(
 
 def main():
 
-    print("\n")
-
+    print("=" * 70)
+    print("PLEIONE")
+    print("SIH 26170")
+    print("MODULE C: RISK FUSION & EARLY SCREENING")
     print("=" * 70)
 
+    print("\nRisk weights:")
+
     print(
-        "PLEIONE - CONFIGURABLE RISK SCORING "
-        "& QA POLICY ENGINE"
+        f"  anomaly        : "
+        f"{WEIGHTS['anomaly']:.3f}"
     )
 
-    print("=" * 70)
-
-    # ========================================================
-    # LOAD CONFIGURATION
-    # ========================================================
-
     print(
-        "\nLoading configuration..."
+        f"  drift          : "
+        f"{WEIGHTS['drift']:.3f}"
     )
 
-    config = load_config()
+    print(
+        f"  future         : "
+        f"{WEIGHTS['future']:.3f}"
+    )
 
     print(
-        "Configuration loaded successfully."
+        f"  specification  : "
+        f"{WEIGHTS['specification']:.3f}"
+    )
+
+    print("\nRisk thresholds:")
+
+    print(
+        f"  MEDIUM  >= "
+        f"{THRESHOLDS['medium']:.1f}"
+    )
+
+    print(
+        f"  HIGH    >= "
+        f"{THRESHOLDS['high']:.1f}"
+    )
+
+    print(
+        f"  CRITICAL>= "
+        f"{THRESHOLDS['critical']:.1f}"
     )
 
     # --------------------------------------------------------
-    # Display weights.
-    # --------------------------------------------------------
-
-    weights = config[
-        "risk_calculation"
-    ][
-        "weights"
-    ]
-
-    print(
-        "\nRisk weights:"
-    )
-
-    for (
-        name,
-        weight
-    ) in weights.items():
-
-        print(
-            f"  {name:<15}: "
-            f"{weight}"
-        )
-
-    # --------------------------------------------------------
-    # Display QA policy.
-    # --------------------------------------------------------
-
-    print(
-        "\nQA classifications:"
-    )
-
-    for classification in config[
-        "qa_policy"
-    ][
-        "classifications"
-    ]:
-
-        print(
-
-            f"  {classification['name']}: "
-            f"{classification['min_risk']} - "
-            f"{classification['max_risk']}"
-        )
-
-    # ========================================================
-    # FIND ONLY MODULE A STAGES 1-5
-    # ========================================================
-
-    print(
-        "\nChecking Module A cumulative stages..."
-    )
-
-    stage_files = []
-
-    for stage_number in range(
-        1,
-        MAX_SUPPORTED_STAGE + 1
-    ):
-
-        stage_path = os.path.join(
-
-            MODULE_A_DIR,
-
-            f"stage_"
-            f"{stage_number:02d}.csv"
-        )
-
-        if os.path.exists(
-            stage_path
-        ):
-
-            stage_files.append(
-                stage_path
-            )
-
-        else:
-
-            print(
-                f"WARNING: Expected stage "
-                f"{stage_number} not found:"
-            )
-
-            print(
-                f"         {stage_path}"
-            )
-
-    if not stage_files:
-
-        raise FileNotFoundError(
-
-            "No supported Module A "
-            "stage files were found."
-        )
-
-    print(
-        "\nStages that WILL be processed:"
-    )
-
-    for path in stage_files:
-
-        print(
-            f"  {os.path.basename(path)}"
-        )
-
-    print(
-        "\nStages 6-10 are intentionally "
-        "ignored because Module B currently "
-        "has only 10,000 predictions."
-    )
-
-    # ========================================================
     # LOAD MODULE B
-    # ========================================================
+    # --------------------------------------------------------
 
-    print(
-        "\nLoading Module B predictions..."
-    )
+    print("\nLoading Module B...")
 
-    if not os.path.exists(
-        MODULE_B_PATH
-    ):
-
+    if not MODULE_B_FILE.exists():
         raise FileNotFoundError(
-
-            f"Module B file not found:\n"
-            f"{MODULE_B_PATH}"
+            f"Module B file not found: {MODULE_B_FILE}"
         )
 
-    module_b_df = pd.read_csv(
-        MODULE_B_PATH
+    module_b = pd.read_csv(
+        MODULE_B_FILE
     )
 
-    validate_module_b(
-        module_b_df
-    )
-
-    module_b_df[
-        "component_id"
-    ] = normalize_component_id(
-        module_b_df[
-            "component_id"
-        ]
+    module_b = validate_module_b(
+        module_b
     )
 
     print(
-        f"Module B rows: "
-        f"{len(module_b_df)}"
+        f"Module B components: {len(module_b)}"
+    )
+
+    calibration = (
+        calculate_module_b_calibration(
+            module_b
+        )
+    )
+
+    # --------------------------------------------------------
+    # PROCESS ALL CUMULATIVE STAGES
+    # --------------------------------------------------------
+
+    stage_results = []
+
+    for stage_number in range(1, 6):
+
+        result = process_stage(
+            stage_number,
+            module_b,
+            calibration,
+        )
+
+        stage_results.append(
+            result
+        )
+
+    # --------------------------------------------------------
+    # FINAL RESULT
+    # --------------------------------------------------------
+
+    final_result = build_final_results(
+        stage_results
+    )
+
+    # --------------------------------------------------------
+    # SUMMARY
+    # --------------------------------------------------------
+
+    build_stage_summary(
+        stage_results
+    )
+
+    # --------------------------------------------------------
+    # VALIDATE
+    # --------------------------------------------------------
+
+    validate_final_result(
+        final_result
+    )
+
+    # --------------------------------------------------------
+    # REPORT
+    # --------------------------------------------------------
+
+    print_final_report(
+        final_result
     )
 
     print(
-        f"Module B unique components: "
-        f"{module_b_df['component_id'].nunique()}"
-    )
-
-    # ========================================================
-    # PROCESS STAGES 1-5
-    # ========================================================
-
-    all_summaries = []
-
-    latest_result = None
-
-    for stage_file in stage_files:
-
-        # ----------------------------------------------------
-        # Get stage number directly from filename.
-        #
-        # No stage_summary.csv can reach this point because
-        # we explicitly constructed stage_files above.
-        # ----------------------------------------------------
-
-        filename = os.path.basename(
-            stage_file
-        )
-
-        stage_number = int(
-
-            filename
-            .replace(
-                "stage_",
-                ""
-            )
-            .replace(
-                ".csv",
-                ""
-            )
-        )
-
-        result_df, summary = process_stage(
-
-            stage_file,
-
-            module_b_df,
-
-            config,
-
-            stage_number
-        )
-
-        all_summaries.append(
-            summary
-        )
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # This is NOT accumulating risk scores.
-        #
-        # latest_result simply points to the newest cumulative
-        # stage.
-        #
-        # Therefore after stage 5, it contains all 10,000
-        # components.
-        # ----------------------------------------------------
-
-        latest_result = result_df
-
-    # ========================================================
-    # SAVE STAGE SUMMARY
-    # ========================================================
-
-    summary_df = pd.DataFrame(
-        all_summaries
-    )
-
-    summary_df.to_csv(
-
-        SUMMARY_PATH,
-
-        index=False
+        "\nFinal output:"
     )
 
     print(
-        f"\nSaved stage summary:"
+        f"  {RISK_DIR / 'overall_risk_results.csv'}"
     )
 
     print(
-        SUMMARY_PATH
-    )
-
-    # ========================================================
-    # SAVE FINAL OVERALL RESULT
-    # ========================================================
-
-    if latest_result is not None:
-
-        latest_result.to_csv(
-
-            OVERALL_OUTPUT_PATH,
-
-            index=False
-        )
-
-        print(
-            "\n"
-            + "=" * 70
-        )
-
-        print(
-            "FINAL CUMULATIVE RISK RESULT"
-        )
-
-        print(
-            "=" * 70
-        )
-
-        print(
-            f"Saved: "
-            f"{OVERALL_OUTPUT_PATH}"
-        )
-
-        print(
-            f"Total components: "
-            f"{len(latest_result)}"
-        )
-
-        print(
-            f"Average risk: "
-            f"{latest_result['risk_score'].mean():.2f}"
-        )
-
-        print(
-            f"Maximum risk: "
-            f"{latest_result['risk_score'].max():.2f}"
-        )
-
-        # ----------------------------------------------------
-        # QA distribution
-        # ----------------------------------------------------
-
-        print(
-            "\nQA classification counts:"
-        )
-
-        print(
-            latest_result[
-                "qa_classification"
-            ]
-            .value_counts()
-            .to_string()
-        )
-
-        # ----------------------------------------------------
-        # Top risk components
-        # ----------------------------------------------------
-
-        print(
-            "\nTop 10 highest-risk components:"
-        )
-
-        display_columns = [
-
-            "component_id",
-
-            "component_type",
-
-            "risk_score",
-
-            "qa_classification",
-
-            "anomaly_factor",
-
-            "drift_factor",
-
-            "future_factor",
-
-            "specification_factor"
-        ]
-
-        print(
-
-            latest_result[
-                display_columns
-            ]
-            .head(10)
-            .to_string(
-                index=False
-            )
-        )
-
-    # ========================================================
-    # FINISHED
-    # ========================================================
-
-    print(
-        "\n"
-        + "=" * 70
+        f"  {RISK_DIR / 'risk_stage_summary.csv'}"
     )
 
     print(
-        "RISK ENGINE COMPLETED SUCCESSFULLY"
-    )
-
-    print(
-        "=" * 70
+        "\nModule C completed successfully."
     )
 
 
 # ============================================================
-# PROGRAM ENTRY POINT
+# ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
-
     main()

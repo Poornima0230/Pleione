@@ -1,10 +1,8 @@
-from fastapi import APIRouter, HTTPException
 from pathlib import Path
-from functools import lru_cache
+from threading import Lock
 
 import pandas as pd
-
-from api.services.data_service import clean_records
+from fastapi import APIRouter, HTTPException, Query
 
 
 router = APIRouter(
@@ -13,178 +11,462 @@ router = APIRouter(
 )
 
 
+# ============================================================
+# PATHS
+# ============================================================
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-ANOMALY_FILE = (
+MODULE_A_FILE = (
     BASE_DIR
     / "data"
-    / "module_A_anomaly_results.csv"
+    / "module_A"
+    / "module_A_all_predictions.csv"
 )
 
 
-# ---------------------------------------------------------
-# LOAD DATA
-# ---------------------------------------------------------
+# ============================================================
+# REQUIRED CURRENT MODULE A COLUMNS
+# ============================================================
 
-@lru_cache(maxsize=1)
-def _load_anomaly_data(file_mtime: float):
-    """
-    Load the anomaly result CSV into memory.
+REQUIRED_COLUMNS = [
+    "component_id",
+    "lot_id",
+    "component_type",
+    "temperature_C",
+    "voltage_V",
+    "iddq_0h_uA",
+    "leakage_0h_uA",
+    "module_a_score",
+    "module_a_status",
+    "peer_source",
+]
 
-    The file modification time is used as the cache key.
-    If ML writes a new CSV, the modification time changes and
-    the data is automatically reloaded.
-    """
 
-    df = pd.read_csv(ANOMALY_FILE)
+# ============================================================
+# IN-MEMORY CACHE
+# ============================================================
 
-    return df
+_CACHE_LOCK = Lock()
+_CACHE_DF: pd.DataFrame | None = None
+_CACHE_SIGNATURE: tuple[int, int] | None = None
 
 
-def get_anomaly_dataframe() -> pd.DataFrame:
-    """
-    Return the current anomaly dataframe.
-
-    Cached between requests so the CSV is not repeatedly
-    parsed by pandas.
-    """
-
-    if not ANOMALY_FILE.exists():
+def get_file_signature() -> tuple[int, int]:
+    if not MODULE_A_FILE.exists():
         raise HTTPException(
             status_code=404,
-            detail="Module A anomaly results not found",
+            detail=(
+                "Current Module A output was not found at: "
+                f"{MODULE_A_FILE}"
+            ),
         )
 
-    file_mtime = ANOMALY_FILE.stat().st_mtime
+    stat = MODULE_A_FILE.stat()
 
-    return _load_anomaly_data(file_mtime).copy()
+    return (
+        int(stat.st_mtime_ns),
+        int(stat.st_size),
+    )
 
 
-# ---------------------------------------------------------
+def load_module_a_data() -> pd.DataFrame:
+    """
+    Load the current Module A all-predictions file.
+
+    The file is cached in memory so the CSV is not read from disk
+    on every frontend request.
+    """
+
+    global _CACHE_DF
+    global _CACHE_SIGNATURE
+
+    signature = get_file_signature()
+
+    with _CACHE_LOCK:
+        if (
+            _CACHE_DF is not None
+            and _CACHE_SIGNATURE == signature
+        ):
+            return _CACHE_DF.copy()
+
+        try:
+            df = pd.read_csv(MODULE_A_FILE)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to read Module A output: {exc}",
+            )
+
+        missing = [
+            column
+            for column in REQUIRED_COLUMNS
+            if column not in df.columns
+        ]
+
+        if missing:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": (
+                        "Current Module A output is missing "
+                        "required columns."
+                    ),
+                    "missing_columns": missing,
+                    "file": str(MODULE_A_FILE),
+                },
+            )
+
+        # ----------------------------------------------------
+        # Keep only the columns needed by this page.
+        # ----------------------------------------------------
+
+        df = df[REQUIRED_COLUMNS].copy()
+
+        # ----------------------------------------------------
+        # Normalize text columns.
+        # ----------------------------------------------------
+
+        for column in [
+            "component_id",
+            "lot_id",
+            "component_type",
+            "module_a_status",
+            "peer_source",
+        ]:
+            df[column] = (
+                df[column]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+            )
+
+        # ----------------------------------------------------
+        # Normalize numeric columns.
+        # ----------------------------------------------------
+
+        numeric_columns = [
+            "temperature_C",
+            "voltage_V",
+            "iddq_0h_uA",
+            "leakage_0h_uA",
+            "module_a_score",
+        ]
+
+        for column in numeric_columns:
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce",
+            )
+
+        # ----------------------------------------------------
+        # One current record per component.
+        # ----------------------------------------------------
+
+        df = df.drop_duplicates(
+            subset=["component_id"],
+            keep="last",
+        ).copy()
+
+        # ----------------------------------------------------
+        # Normalize status.
+        # ----------------------------------------------------
+
+        df["module_a_status"] = (
+            df["module_a_status"]
+            .str.upper()
+        )
+
+        # ----------------------------------------------------
+        # Sort strongest anomaly first.
+        # ----------------------------------------------------
+
+        df = df.sort_values(
+            by="module_a_score",
+            ascending=False,
+            na_position="last",
+        ).reset_index(drop=True)
+
+        _CACHE_DF = df
+        _CACHE_SIGNATURE = signature
+
+        return df.copy()
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def clean_value(value):
+    if pd.isna(value):
+        return None
+
+    if isinstance(value, float):
+        return round(float(value), 6)
+
+    return value
+
+
+def clean_record(row: pd.Series) -> dict:
+    return {
+        "component_id": clean_value(
+            row["component_id"]
+        ),
+        "lot_id": clean_value(
+            row["lot_id"]
+        ),
+        "component_type": clean_value(
+            row["component_type"]
+        ),
+
+        "temperature_C": clean_value(
+            row["temperature_C"]
+        ),
+        "voltage_V": clean_value(
+            row["voltage_V"]
+        ),
+
+        "iddq_0h_uA": clean_value(
+            row["iddq_0h_uA"]
+        ),
+        "leakage_0h_uA": clean_value(
+            row["leakage_0h_uA"]
+        ),
+
+        "module_a_score": clean_value(
+            row["module_a_score"]
+        ),
+        "module_a_status": clean_value(
+            row["module_a_status"]
+        ),
+        "peer_source": clean_value(
+            row["peer_source"]
+        ),
+    }
+
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+@router.get("/summary")
+def get_anomaly_summary():
+    df = load_module_a_data()
+
+    total = len(df)
+
+    anomalous = int(
+        (df["module_a_status"] == "ANOMALOUS").sum()
+    )
+
+    watch = int(
+        (df["module_a_status"] == "WATCH").sum()
+    )
+
+    normal = int(
+        (df["module_a_status"] == "NORMAL").sum()
+    )
+
+    attention = anomalous + watch
+
+    return {
+        "total_components": total,
+        "anomalous": anomalous,
+        "watch": watch,
+        "normal": normal,
+        "attention": attention,
+        "anomaly_rate": (
+            round(
+                anomalous / total * 100,
+                2,
+            )
+            if total
+            else 0
+        ),
+        "attention_rate": (
+            round(
+                attention / total * 100,
+                2,
+            )
+            if total
+            else 0
+        ),
+    }
+
+
+# ============================================================
+# FILTER OPTIONS
+# ============================================================
+
+@router.get("/filters")
+def get_anomaly_filters():
+    df = load_module_a_data()
+
+    lots = sorted(
+        [
+            value
+            for value in df["lot_id"].dropna().unique()
+            if str(value).strip()
+        ]
+    )
+
+    component_types = sorted(
+        [
+            value
+            for value in df["component_type"].dropna().unique()
+            if str(value).strip()
+        ]
+    )
+
+    statuses = sorted(
+        [
+            value
+            for value in df["module_a_status"].dropna().unique()
+            if str(value).strip()
+        ]
+    )
+
+    return {
+        "lots": lots,
+        "component_types": component_types,
+        "statuses": statuses,
+    }
+
+
+# ============================================================
 # ANOMALIES
-# ---------------------------------------------------------
+# ============================================================
 
 @router.get("/")
 def get_anomalies(
-    page: int = 1,
-    limit: int = 25,
-    lot_id: str = "",
+    page: int = Query(
+        default=1,
+        ge=1,
+    ),
+    limit: int = Query(
+        default=25,
+        ge=1,
+        le=200,
+    ),
+    search: str | None = Query(
+        default=None,
+    ),
+    lot_id: str | None = Query(
+        default=None,
+    ),
+    component_type: str | None = Query(
+        default=None,
+    ),
+    status: str | None = Query(
+        default=None,
+    ),
 ):
-    try:
-        # -------------------------------------------------
-        # VALIDATE PAGINATION
-        # -------------------------------------------------
+    df = load_module_a_data()
 
-        if page < 1:
-            page = 1
+    # --------------------------------------------------------
+    # SEARCH
+    # --------------------------------------------------------
 
-        if limit < 1:
-            limit = 25
+    if search:
+        query = search.strip().lower()
 
-        # This is only the number of records returned
-        # per request. It is NOT a limit on the dataset.
-        limit = min(limit, 100)
-
-        # -------------------------------------------------
-        # LOAD DATA
-        # -------------------------------------------------
-
-        df = get_anomaly_dataframe()
-
-        # -------------------------------------------------
-        # ANOMALY FILTER
-        # -------------------------------------------------
-
-        if "anomaly_flag" in df.columns:
-
-            anomaly_values = (
-                df["anomaly_flag"]
-                .astype(str)
-                .str.strip()
+        if query:
+            mask = (
+                df["component_id"]
                 .str.lower()
-            )
-
-            df = df[
-                anomaly_values.isin(
-                    [
-                        "true",
-                        "1",
-                        "yes",
-                    ]
+                .str.contains(
+                    query,
+                    na=False,
                 )
-            ]
-
-        # -------------------------------------------------
-        # LOT FILTER
-        # -------------------------------------------------
-
-        if lot_id.strip():
-
-            lot_value = (
-                lot_id
-                .strip()
-                .lower()
+                |
+                df["lot_id"]
+                .str.lower()
+                .str.contains(
+                    query,
+                    na=False,
+                )
+                |
+                df["component_type"]
+                .str.lower()
+                .str.contains(
+                    query,
+                    na=False,
+                )
             )
 
-            df = df[
-                df["lot_id"]
-                .astype(str)
-                .str.strip()
-                .str.lower()
-                == lot_value
-            ]
+            df = df[mask].copy()
 
-        # -------------------------------------------------
-        # TOTAL
-        # -------------------------------------------------
+    # --------------------------------------------------------
+    # LOT
+    # --------------------------------------------------------
 
-        total = len(df)
+    if lot_id and lot_id != "ALL":
+        df = df[
+            df["lot_id"].str.upper()
+            == lot_id.strip().upper()
+        ].copy()
 
-        # -------------------------------------------------
-        # PAGINATION
-        # -------------------------------------------------
+    # --------------------------------------------------------
+    # COMPONENT TYPE
+    # --------------------------------------------------------
 
-        start = (page - 1) * limit
-        end = start + limit
+    if component_type and component_type != "ALL":
+        df = df[
+            df["component_type"].str.upper()
+            == component_type.strip().upper()
+        ].copy()
 
-        page_data = df.iloc[start:end]
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
 
-        # -------------------------------------------------
-        # SERIALIZE
-        # -------------------------------------------------
+    if status and status != "ALL":
+        df = df[
+            df["module_a_status"].str.upper()
+            == status.strip().upper()
+        ].copy()
 
-        records = page_data.to_dict(
-            orient="records"
-        )
+    # --------------------------------------------------------
+    # SORT
+    # --------------------------------------------------------
 
-        records = clean_records(records)
+    df = df.sort_values(
+        by="module_a_score",
+        ascending=False,
+        na_position="last",
+    )
 
-        # -------------------------------------------------
-        # RESPONSE
-        # -------------------------------------------------
+    # --------------------------------------------------------
+    # PAGINATION
+    # --------------------------------------------------------
 
-        return {
-            "total": int(total),
-            "page": int(page),
-            "limit": int(limit),
-            "pages": (
-                (total + limit - 1) // limit
-                if total > 0
-                else 0
-            ),
-            "lot_id": (
-                lot_id
-                if lot_id.strip()
-                else None
-            ),
-            "data": records,
-        }
+    total = len(df)
 
-    except HTTPException:
-        raise
+    pages = (
+        (total + limit - 1) // limit
+        if total
+        else 0
+    )
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e),
-        )
+    # If filters reduce the result and the requested page
+    # is now beyond the last page, return the last page.
+    if pages > 0 and page > pages:
+        page = pages
+
+    start = (page - 1) * limit
+    end = start + limit
+
+    page_df = df.iloc[start:end]
+
+    data = [
+        clean_record(row)
+        for _, row in page_df.iterrows()
+    ]
+
+    return {
+        "page": page,
+        "limit": limit,
+        "pages": pages,
+        "total": total,
+        "data": data,
+    }

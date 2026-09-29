@@ -1,0 +1,126 @@
+Starting module_a
+Python: C:\Users\peris\Desktop\SIH2k26\venv\Scripts\python.exe
+Script: C:\Users\peris\Desktop\SIH2k26\src\anomaly_detection.py
+Working directory: C:\Users\peris\Desktop\SIH2k26
+----------------------------------------------------------------------
+
+
+======================================================================
+SIH 26170 - MODULE A
+0H IDDQ COMPONENT-AWARE ANOMALY DETECTION
+======================================================================
+
+Module A uses ONLY:
+  Measurement: iddq_0h_uA
+  Statistical method: group mean/std z-score + IQR
+  Machine-learning method: Isolation Forest
+  No temporal drift analysis
+  No later Iddq measurements
+  No leakage measurements
+
+Number of batches found: 5
+  batch_1.csv
+  batch_2.csv
+  batch_3.csv
+  batch_4.csv
+  batch_5.csv
+
+Loading batch files...
+  batch_1.csv: 2,000 rows
+  batch_2.csv: 2,000 rows
+  batch_3.csv: 2,000 rows
+  batch_4.csv: 2,000 rows
+  batch_5.csv: 2,000 rows
+
+Total rows: 10,000
+
+Adding batch 1...
+
+======================================================================
+STAGE 1: 2,000 COMPONENTS
+======================================================================
+Module A measurement: iddq_0h_uA
+1/4 Calculating Iddq_0h peer-group statistics...
+2/4 Calculating Iddq_0h statistical anomaly score...
+3/4 Running Isolation Forest on Iddq_0h...
+4/4 Combining statistical + Isolation Forest scores...
+
+Components: 2,000
+Anomalies: 4
+Saved: data/module_A_results\stage_01.csv
+
+Adding batch 2...
+
+======================================================================
+STAGE 2: 4,000 COMPONENTS
+======================================================================
+Module A measurement: iddq_0h_uA
+1/4 Calculating Iddq_0h peer-group statistics...
+2/4 Calculating Iddq_0h statistical anomaly score...
+3/4 Running Isolation Forest on Iddq_0h...
+4/4 Combining statistical + Isolation Forest scores...
+
+Components: 4,000
+Anomalies: 6
+Saved: data/module_A_results\stage_02.csv
+
+Adding batch 3...
+
+======================================================================
+STAGE 3: 6,000 COMPONENTS
+======================================================================
+Module A measurement: iddq_0h_uA
+1/4 Calculating Iddq_0h peer-group statistics...
+2/4 Calculating Iddq_0h statistical anomaly score...
+3/4 Running Isolation Forest on Iddq_0h...
+4/4 Combining statistical + Isolation Forest scores...
+
+Components: 6,000
+Anomalies: 9
+Saved: data/module_A_results\stage_03.csv
+
+Adding batch 4...
+
+======================================================================
+STAGE 4: 8,000 COMPONENTS
+======================================================================
+Module A measurement: iddq_0h_uA
+1/4 Calculating Iddq_0h peer-group statistics...
+2/4 Calculating Iddq_0h statistical anomaly score...
+3/4 Running Isolation Forest on Iddq_0h...
+4/4 Combining statistical + Isolation Forest scores...
+
+Components: 8,000
+Anomalies: 10
+Saved: data/module_A_results\stage_04.csv
+
+Adding batch 5...
+
+======================================================================
+STAGE 5: 10,000 COMPONENTS
+======================================================================
+Module A measurement: iddq_0h_uA
+1/4 Calculating Iddq_0h peer-group statistics...
+2/4 Calculating Iddq_0h statistical anomaly score...
+3/4 Running Isolation Forest on Iddq_0h...
+4/4 Combining statistical + Isolation Forest scores...
+
+Components: 10,000
+Anomalies: 24
+Saved: data/module_A_results\stage_05.csv
+
+======================================================================
+MODULE A COMPLETED
+======================================================================
+
+Total components processed: 10,000
+Final anomalies: 24
+
+Module A output contains anomaly evidence only.
+Risk fusion and screening should be performed by the downstream module.
+
+Stage results saved to: data/module_A_results
+Stage summary saved to: data/module_A_results\stage_summary.csv
+Final Module A file: data\module_A_anomaly_results.csv
+
+======================================================================

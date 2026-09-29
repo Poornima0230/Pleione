@@ -1,0 +1,47 @@
+{
+  "module": "B",
+  "purpose": "0h + 24h -> 168h prediction",
+  "input_features": [
+    "temperature_C",
+    "voltage_V",
+    "iddq_0h_uA",
+    "iddq_24h_uA",
+    "leakage_0h_uA",
+    "leakage_24h_uA",
+    "delta_0_24",
+    "component_type"
+  ],
+  "forbidden_features": [
+    "iddq_96h_uA",
+    "iddq_168h_uA",
+    "leakage_96h_uA",
+    "leakage_168h_uA",
+    "ground_truth",
+    "absolute_limit_uA",
+    "lot_id",
+    "component_id"
+  ],
+  "training_batches": [
+    "batch_1.csv",
+    "batch_2.csv",
+    "batch_3.csv"
+  ],
+  "calibration_batch": "batch_4.csv",
+  "test_batch": "batch_5.csv",
+  "all_prediction_batches": [
+    "batch_1.csv",
+    "batch_2.csv",
+    "batch_3.csv",
+    "batch_4.csv",
+    "batch_5.csv"
+  ],
+  "target": "iddq_168h_uA",
+  "model": "RandomForestRegressor",
+  "n_estimators": 400,
+  "max_features": "sqrt",
+  "min_samples_leaf": 2,
+  "random_state": 42,
+  "conformal_alpha": 0.1,
+  "conformal_q": 18.385202177813866,
+  "calibration_coverage": 0.9005
+}

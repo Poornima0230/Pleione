@@ -1,0 +1,41 @@
+[
+  {
+    "run_id": "RUN-20260928-2A21AB",
+    "started_at": "2026-09-28T10:14:50.079875+00:00",
+    "completed_at": null,
+    "status": "not_started",
+    "lot_id": "string",
+    "component_count": 0,
+    "notes": "string",
+    "pipeline": {
+      "module_a": {
+        "status": "not_available",
+        "components": 0,
+        "artifact": {
+          "available": true,
+          "file": "data\\module_A_results\\stage_05.csv",
+          "modified_at": "2026-09-27T03:27:47.043273+00:00"
+        }
+      },
+      "module_b": {
+        "status": "not_available",
+        "components": 0,
+        "artifact": {
+          "available": true,
+          "file": "data\\module_B\\module_B_drift_predictions.csv",
+          "modified_at": "2026-09-27T03:26:21.408504+00:00"
+        }
+      },
+      "module_c": {
+        "status": "not_available",
+        "components": 0,
+        "artifact": {
+          "available": true,
+          "file": "data\\risk\\overall_risk_results.csv",
+          "modified_at": "2026-09-26T10:49:55.076146+00:00"
+        }
+      }
+    },
+    "created_at": "2026-09-28T10:14:50.079875+00:00"
+  }
+]

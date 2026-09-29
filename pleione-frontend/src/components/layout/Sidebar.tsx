@@ -73,6 +73,21 @@ const navigation = [
     ),
   },
   {
+    name: "Forecast",
+    href: "/forecast",
+    icon: (
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+      >
+        <path d="M4 17l5-5 4 4 7-8" />
+        <path d="M16 8h4v4" />
+      </svg>
+    ),
+  },
+  {
     name: "Screening Run",
     href: "/screening-runs",
     icon: (

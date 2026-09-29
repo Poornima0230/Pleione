@@ -1,0 +1,111 @@
+Starting module_c
+Python: C:\Users\peris\Desktop\SIH2k26\venv\Scripts\python.exe
+Script: C:\Users\peris\Desktop\SIH2k26\risk_engine.py
+Working directory: C:\Users\peris\Desktop\SIH2k26
+----------------------------------------------------------------------
+
+
+======================================================================
+PLEIONE - PROSPECTIVE RISK FUSION & EARLY SCREENING
+======================================================================
+
+Decision policy:
+  Module A uses only 0h Iddq anomaly evidence.
+  Module B uses early inputs and predicts 168h behavior.
+  Module C uses only prospective evidence for risk/decision.
+  Actual 168h and ground truth are evaluation-only.
+
+Risk weights:
+  anomaly        : 0.3
+  drift          : 0.25
+  future         : 0.3
+  specification  : 0.15
+
+Checking Module A cumulative stages...
+
+Module B rows: 10000
+Module B unique components: 10000
+
+======================================================================
+PROCESSING CUMULATIVE STAGE 1
+======================================================================
+Module A cumulative components: 2000
+Module B matching components: 2000
+
+Saved: data/risk\risk_stage_01.csv
+Rows written: 2000
+
+======================================================================
+PROCESSING CUMULATIVE STAGE 2
+======================================================================
+Module A cumulative components: 4000
+Module B matching components: 4000
+
+Saved: data/risk\risk_stage_02.csv
+Rows written: 4000
+
+======================================================================
+PROCESSING CUMULATIVE STAGE 3
+======================================================================
+Module A cumulative components: 6000
+Module B matching components: 6000
+
+Saved: data/risk\risk_stage_03.csv
+Rows written: 6000
+
+======================================================================
+PROCESSING CUMULATIVE STAGE 4
+======================================================================
+Module A cumulative components: 8000
+Module B matching components: 8000
+
+Saved: data/risk\risk_stage_04.csv
+Rows written: 8000
+
+======================================================================
+PROCESSING CUMULATIVE STAGE 5
+======================================================================
+Module A cumulative components: 10000
+Module B matching components: 10000
+
+Saved: data/risk\risk_stage_05.csv
+Rows written: 10000
+
+Saved stage summary: data/risk\risk_stage_summary.csv
+
+======================================================================
+FINAL PROSPECTIVE RISK RESULT
+======================================================================
+Saved: data/risk\overall_risk_results.csv
+Total components: 10000
+Average risk: 42.26
+Maximum risk: 71.16
+
+QA classification counts:
+qa_classification
+Monitor    6460
+Pass       3226
+Review      314
+
+Final decision counts:
+final_decision
+PRIORITY_SCREENING    6472
+MONITOR               2161
+NORMAL                1367
+
+Top 10 highest-risk components:
+component_id component_type  risk_score qa_classification     final_decision  anomaly_factor  drift_factor  future_factor  specification_factor  statistical_score  isolation_forest_score  combined_anomaly_score  predicted_168h_uA  prediction_lower_uA  prediction_upper_uA  predicted_drift_rate  safety_slope
+       C5214          TypeB   71.160443            Review PRIORITY_SCREENING        0.629752      0.470716            1.0                   0.7           0.300000                0.959503                0.629752          33.741576             8.024533            59.458618              0.153105      0.017857
+       C4160          TypeA   70.870815            Review PRIORITY_SCREENING        0.627567      0.461752            1.0                   0.7           0.347771                0.907364                0.627567          31.895393             6.178351            57.612435              0.142056      0.017857
+       C9853          TypeB   69.104791            Review PRIORITY_SCREENING        0.557193      0.475560            1.0                   0.7           0.423678                0.690707                0.557193          34.982643             9.265601            60.699685              0.160016      0.017857
+       C1419          TypeB   68.619235            Review PRIORITY_SCREENING        0.616392      0.385099            1.0                   0.7           0.352069                0.880715                0.616392          34.836727             9.119685            60.553770              0.118314      0.017857
+       C9616          TypeC   68.384523            Review PRIORITY_SCREENING        0.532347      0.476564            1.0                   0.7           0.300000                0.764695                0.532347          35.131949             9.414906            60.848991              0.161143      0.017857
+       C1516          TypeC   68.349591            Review PRIORITY_SCREENING        0.563128      0.438230            1.0                   0.7           0.300000                0.826256                0.563128          42.067524            16.350482            67.784566              0.161414      0.017857
+       C5745          TypeA   67.086904            Review PRIORITY_SCREENING        0.500000      0.463476            1.0                   0.7           0.000000                1.000000                0.500000          32.177990             6.460948            57.895032              0.143917      0.017857
+       C1425          TypeC   66.978672            Review PRIORITY_SCREENING        0.500000      0.459147            1.0                   0.7           0.000000                1.000000                0.500000          31.319361             5.602318            57.036403              0.138806      0.017857
+       C2729          TypeB   66.972884            Review PRIORITY_SCREENING        0.479752      0.483213            1.0                   0.7           0.000000                0.959503                0.479752          36.632573            10.915531            62.349615              0.170313      0.017857
+        C223          TypeB   66.962450            Review PRIORITY_SCREENING        0.495873      0.463450            1.0                   0.7           0.000000                0.991746                0.495873          32.193956             6.476914            57.910998              0.143952      0.017857
+
+======================================================================
+PROSPECTIVE RISK ENGINE COMPLETED SUCCESSFULLY
+======================================================================

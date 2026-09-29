@@ -1,0 +1,84 @@
+Starting module_c
+Python: C:\Users\peris\Desktop\SIH2k26\venv\Scripts\python.exe
+Script: C:\Users\peris\Desktop\SIH2k26\risk_engine.py
+Working directory: C:\Users\peris\Desktop\SIH2k26
+----------------------------------------------------------------------
+
+
+
+======================================================================
+PLEIONE - RISK FUSION & EARLY SCREENING DECISION ENGINE
+======================================================================
+
+Loading configuration...
+Configuration loaded successfully.
+
+Risk weights:
+  anomaly        : 0.3
+  drift          : 0.25
+  future         : 0.3
+  specification  : 0.15
+
+Internal risk classifications:
+  Pass: 0 - 30
+  Monitor: 30 - 60
+  Review: 60 - 100
+
+Final screening outcomes:
+  PASS
+  REVIEW
+  REJECT
+
+Checking Module A cumulative stages...
+
+Stages that WILL be processed:
+  stage_01.csv
+  stage_02.csv
+  stage_03.csv
+  stage_04.csv
+  stage_05.csv
+
+Stages 6-10 are intentionally ignored because Module B currently has only 10,000 predictions.
+
+Loading Module B predictions...
+Module B rows: 10000
+Module B unique components: 10000
+
+======================================================================
+PROCESSING CUMULATIVE STAGE 1
+======================================================================
+Module A: data/module_A_results\stage_01.csv
+Traceback (most recent call last):
+  File "C:\Users\peris\Desktop\SIH2k26\risk_engine.py", line 2492, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\peris\Desktop\SIH2k26\risk_engine.py", line 2204, in main
+    result_df, summary = process_stage(
+                         ~~~~~~~~~~~~~^
+    
+    
+    ...<6 lines>...
+        stage_number
+        ^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\peris\Desktop\SIH2k26\risk_engine.py", line 1260, in process_stage
+    validate_module_a(
+    ~~~~~~~~~~~~~~~~~^
+        module_a_df,
+        ^^^^^^^^^^^^
+        module_a_path
+        ^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\peris\Desktop\SIH2k26\risk_engine.py", line 293, in validate_module_a
+    raise ValueError(
+    ...<7 lines>...
+    )
+ValueError: 
+Module A file 'data/module_A_results\stage_01.csv' is missing columns:
+  - temporal_anomaly_score
+  - temporal_anomaly_flag
+  - statistical_evidence_count
+  - limit_violation
+  - limit_excess_uA

@@ -1,0 +1,528 @@
+Starting module_b
+Python: C:\Users\peris\Desktop\SIH2k26\venv\Scripts\python.exe
+Script: C:\Users\peris\Desktop\SIH2k26\src\module_b_drift_predictor.py
+Working directory: C:\Users\peris\Desktop\SIH2k26
+----------------------------------------------------------------------
+
+================================================================================
+SIH 26170
+MODULE B: MULTIVARIATE TIME-SERIES DRIFT PREDICTOR
+================================================================================
+
+Prediction horizon: 168 hours
+Early observations: (0, 24)
+
+================================================================================
+LOADING CSV FILES
+================================================================================
+File 1: data/batch_1.csv
+File 2: data/batch_2.csv
+File 3: data/batch_3.csv
+File 4: data/batch_4.csv
+File 5: data/batch_5.csv
+
+First CSV loaded.
+Rows: 2000
+Columns: 15
+
+================================================================================
+COLUMN MAPPING
+================================================================================
+
+Component ID     : component_id
+Lot ID           : lot_id
+Ground Truth     : ground_truth
+Component Type   : component_type
+Temperature      : temperature_C
+Voltage          : voltage_V
+Absolute Limit   : absolute_limit_uA
+IDDQ 0h          : iddq_0h_uA
+IDDQ 24h         : iddq_24h_uA
+IDDQ 168h        : iddq_168h_uA
+
+================================================================================
+STARTING CUMULATIVE PROCESSING
+================================================================================
+
+
+################################################################################
+READING BATCH 1
+################################################################################
+
+Batch 1 rows: 2000
+
+
+################################################################################
+CUMULATIVE STAGE 1
+################################################################################
+
+Total cumulative components: 2000
+Prediction-eligible components: 2000
+Components with 168h target: 2000
+
+Data split:
+Training    : 1200
+Calibration : 400
+Testing     : 400
+
+--------------------------------------------------------------------------------
+MODEL COMPARISON
+--------------------------------------------------------------------------------
+
+Training: Linear Regression
+MAE : 14.9301 µA
+RMSE: 17.4246 µA
+R²  : 0.0281
+
+Training: Random Forest
+MAE : 12.7386 µA
+RMSE: 16.0587 µA
+R²  : 0.1745
+
+Training: Gradient Boosting
+MAE : 12.3721 µA
+RMSE: 16.1023 µA
+R²  : 0.1700
+
+--------------------------------------------------------------------------------
+MODEL PERFORMANCE
+--------------------------------------------------------------------------------
+            Model  Calibration_MAE  Calibration_RMSE  Calibration_R2
+Gradient Boosting        12.372057         16.102266        0.170031
+    Random Forest        12.738617         16.058664        0.174519
+Linear Regression        14.930108         17.424630        0.028114
+
+Best model: Gradient Boosting
+
+================================================================================
+STAGE 1 RESULTS
+================================================================================
+
+Cumulative components: 2000
+Best model: Gradient Boosting
+Test MAE: 12.0206 µA
+Test RMSE: 16.0014 µA
+Test R²: 0.1868
+Safety slope: 0.017857 µA/hour
+Prediction interval: ±27.5894 µA
+
+Module B status:
+module_b_status
+PREDICTED_FAILURE    1420
+EARLY_DRIFT_RISK      358
+NORMAL                222
+Name: count, dtype: int64
+
+Future drift risk:
+future_drift_risk
+HIGH      1420
+MEDIUM     358
+LOW        196
+WATCH       26
+Name: count, dtype: int64
+
+Test classification:
+Precision: 0.7686
+Recall: 0.8829
+F1: 0.8218
+
+Confusion Matrix:
+[[  0  84]
+ [ 37 279]]
+
+Stage output saved:
+data/module_B\module_B_stage_1_2000.csv
+
+
+################################################################################
+READING BATCH 2
+################################################################################
+
+Batch 2 rows: 2000
+
+
+################################################################################
+CUMULATIVE STAGE 2
+################################################################################
+
+Total cumulative components: 4000
+Prediction-eligible components: 4000
+Components with 168h target: 4000
+
+Data split:
+Training    : 2400
+Calibration : 800
+Testing     : 800
+
+--------------------------------------------------------------------------------
+MODEL COMPARISON
+--------------------------------------------------------------------------------
+
+Training: Linear Regression
+MAE : 14.9318 µA
+RMSE: 17.4050 µA
+R²  : 0.0386
+
+Training: Random Forest
+MAE : 11.6997 µA
+RMSE: 15.5557 µA
+R²  : 0.2321
+
+Training: Gradient Boosting
+MAE : 11.5802 µA
+RMSE: 15.5647 µA
+R²  : 0.2312
+
+--------------------------------------------------------------------------------
+MODEL PERFORMANCE
+--------------------------------------------------------------------------------
+            Model  Calibration_MAE  Calibration_RMSE  Calibration_R2
+Gradient Boosting        11.580235         15.564687        0.231166
+    Random Forest        11.699749         15.555729        0.232051
+Linear Regression        14.931843         17.404983        0.038612
+
+Best model: Gradient Boosting
+
+================================================================================
+STAGE 2 RESULTS
+================================================================================
+
+Cumulative components: 4000
+Best model: Gradient Boosting
+Test MAE: 11.5465 µA
+Test RMSE: 15.5764 µA
+Test R²: 0.2336
+Safety slope: 0.017857 µA/hour
+Prediction interval: ±27.0675 µA
+
+Module B status:
+module_b_status
+PREDICTED_FAILURE    2874
+EARLY_DRIFT_RISK      609
+NORMAL                517
+Name: count, dtype: int64
+
+Future drift risk:
+future_drift_risk
+HIGH      2874
+MEDIUM     609
+LOW        454
+WATCH       63
+Name: count, dtype: int64
+
+Test classification:
+Precision: 0.7630
+Recall: 0.8560
+F1: 0.8069
+
+Confusion Matrix:
+[[  0 168]
+ [ 91 541]]
+
+Stage output saved:
+data/module_B\module_B_stage_2_4000.csv
+
+
+################################################################################
+READING BATCH 3
+################################################################################
+
+Batch 3 rows: 2000
+
+
+################################################################################
+CUMULATIVE STAGE 3
+################################################################################
+
+Total cumulative components: 6000
+Prediction-eligible components: 6000
+Components with 168h target: 6000
+
+Data split:
+Training    : 3600
+Calibration : 1200
+Testing     : 1200
+
+--------------------------------------------------------------------------------
+MODEL COMPARISON
+--------------------------------------------------------------------------------
+
+Training: Linear Regression
+MAE : 15.0052 µA
+RMSE: 17.4952 µA
+R²  : 0.0364
+
+Training: Random Forest
+MAE : 11.1763 µA
+RMSE: 15.1856 µA
+R²  : 0.2740
+
+Training: Gradient Boosting
+MAE : 11.3608 µA
+RMSE: 15.5177 µA
+R²  : 0.2419
+
+--------------------------------------------------------------------------------
+MODEL PERFORMANCE
+--------------------------------------------------------------------------------
+            Model  Calibration_MAE  Calibration_RMSE  Calibration_R2
+    Random Forest        11.176302         15.185594        0.274019
+Gradient Boosting        11.360797         15.517730        0.241914
+Linear Regression        15.005153         17.495222        0.036391
+
+Best model: Random Forest
+
+================================================================================
+STAGE 3 RESULTS
+================================================================================
+
+Cumulative components: 6000
+Best model: Random Forest
+Test MAE: 11.1265 µA
+Test RMSE: 15.2016 µA
+Test R²: 0.2807
+Safety slope: 0.017857 µA/hour
+Prediction interval: ±25.8499 µA
+
+Module B status:
+module_b_status
+PREDICTED_FAILURE    4140
+EARLY_DRIFT_RISK     1403
+NORMAL                457
+Name: count, dtype: int64
+
+Future drift risk:
+future_drift_risk
+HIGH      4140
+MEDIUM    1403
+LOW        339
+WATCH      118
+Name: count, dtype: int64
+
+Test classification:
+Precision: 0.7859
+Recall: 0.9321
+F1: 0.8528
+
+Confusion Matrix:
+[[  0 243]
+ [ 65 892]]
+
+Stage output saved:
+data/module_B\module_B_stage_3_6000.csv
+
+
+################################################################################
+READING BATCH 4
+################################################################################
+
+Batch 4 rows: 2000
+
+
+################################################################################
+CUMULATIVE STAGE 4
+################################################################################
+
+Total cumulative components: 8000
+Prediction-eligible components: 8000
+Components with 168h target: 8000
+
+Data split:
+Training    : 4800
+Calibration : 1600
+Testing     : 1600
+
+--------------------------------------------------------------------------------
+MODEL COMPARISON
+--------------------------------------------------------------------------------
+
+Training: Linear Regression
+MAE : 15.0551 µA
+RMSE: 17.5450 µA
+R²  : 0.0358
+
+Training: Random Forest
+MAE : 10.6343 µA
+RMSE: 15.0139 µA
+R²  : 0.2939
+
+Training: Gradient Boosting
+MAE : 10.9898 µA
+RMSE: 15.1427 µA
+R²  : 0.2818
+
+--------------------------------------------------------------------------------
+MODEL PERFORMANCE
+--------------------------------------------------------------------------------
+            Model  Calibration_MAE  Calibration_RMSE  Calibration_R2
+    Random Forest        10.634262         15.013945        0.293919
+Gradient Boosting        10.989770         15.142694        0.281758
+Linear Regression        15.055146         17.545000        0.035791
+
+Best model: Random Forest
+
+================================================================================
+STAGE 4 RESULTS
+================================================================================
+
+Cumulative components: 8000
+Best model: Random Forest
+Test MAE: 10.6175 µA
+Test RMSE: 14.9567 µA
+Test R²: 0.2987
+Safety slope: 0.017857 µA/hour
+Prediction interval: ±25.8582 µA
+
+Module B status:
+module_b_status
+PREDICTED_FAILURE    5356
+EARLY_DRIFT_RISK     1469
+NORMAL               1175
+Name: count, dtype: int64
+
+Future drift risk:
+future_drift_risk
+HIGH      5356
+MEDIUM    1469
+LOW       1051
+WATCH      124
+Name: count, dtype: int64
+
+Test classification:
+Precision: 0.7706
+Recall: 0.8331
+F1: 0.8006
+
+Confusion Matrix:
+[[   0  318]
+ [ 214 1068]]
+
+Stage output saved:
+data/module_B\module_B_stage_4_8000.csv
+
+
+################################################################################
+READING BATCH 5
+################################################################################
+
+Batch 5 rows: 2000
+
+
+################################################################################
+CUMULATIVE STAGE 5
+################################################################################
+
+Total cumulative components: 10000
+Prediction-eligible components: 10000
+Components with 168h target: 10000
+
+Data split:
+Training    : 6000
+Calibration : 2000
+Testing     : 2000
+
+--------------------------------------------------------------------------------
+MODEL COMPARISON
+--------------------------------------------------------------------------------
+
+Training: Linear Regression
+MAE : 14.9948 µA
+RMSE: 17.4832 µA
+R²  : 0.0410
+
+Training: Random Forest
+MAE : 10.5419 µA
+RMSE: 14.9598 µA
+R²  : 0.2978
+
+Training: Gradient Boosting
+MAE : 10.6219 µA
+RMSE: 14.9187 µA
+R²  : 0.3017
+
+--------------------------------------------------------------------------------
+MODEL PERFORMANCE
+--------------------------------------------------------------------------------
+            Model  Calibration_MAE  Calibration_RMSE  Calibration_R2
+    Random Forest        10.541933         14.959808        0.297831
+Gradient Boosting        10.621873         14.918715        0.301684
+Linear Regression        14.994757         17.483250        0.040967
+
+Best model: Random Forest
+
+================================================================================
+STAGE 5 RESULTS
+================================================================================
+
+Cumulative components: 10000
+Best model: Random Forest
+Test MAE: 10.4402 µA
+Test RMSE: 14.8851 µA
+Test R²: 0.3023
+Safety slope: 0.017857 µA/hour
+Prediction interval: ±25.7170 µA
+
+Module B status:
+module_b_status
+PREDICTED_FAILURE    6472
+EARLY_DRIFT_RISK     2055
+NORMAL               1473
+Name: count, dtype: int64
+
+Future drift risk:
+future_drift_risk
+HIGH      6472
+MEDIUM    2055
+LOW       1367
+WATCH      106
+Name: count, dtype: int64
+
+Test classification:
+Precision: 0.7683
+Recall: 0.8240
+F1: 0.7952
+
+Confusion Matrix:
+[[   0  398]
+ [ 282 1320]]
+
+Stage output saved:
+data/module_B\module_B_stage_5_10000.csv
+
+
+================================================================================
+MODULE B COMPLETED SUCCESSFULLY
+================================================================================
+
+CUMULATIVE PROCESSING:
+  Batch 1              → 2,000
+  Batch 1 + 2          → 4,000
+  Batch 1 + 2 + 3      → 6,000
+  Batch 1 + ... + 4    → 8,000
+  All 5 batches        → 10,000
+
+MODEL INPUTS:
+  ✓ iddq_0h_uA
+  ✓ iddq_24h_uA
+  ✓ temperature
+  ✓ voltage
+  ✓ component_type
+
+PREDICTION:
+  iddq_168h_uA ← early 0h + 24h observations
+
+FINAL MODEL:
+  Random Forest
+
+FINAL TEST PERFORMANCE:
+  MAE  : 10.4402 µA
+  RMSE : 14.8851 µA
+  R²   : 0.3023
+
+FINAL OUTPUT:
+  data/module_B\module_B_drift_predictions.csv
+
+MODEL:
+  data/module_B\module_B_model.pkl
+
+================================================================================

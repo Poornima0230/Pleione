@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 import pandas as pd
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -19,14 +18,20 @@ from api.routes import (
     component_detail,
 )
 
+# Forecast router is imported directly because
+# api/routes/__init__.py does not exist.
+from api.routes.forecast import router as forecast_router
+
+
 app = FastAPI(
     title="Pleione Reliability Intelligence API",
     version="1.0.0",
 )
 
-# ---------------------------------------------------------
+
+# =========================================================
 # CORS
-# ---------------------------------------------------------
+# =========================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,9 +44,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------
+
+# =========================================================
 # ROUTES
-# ---------------------------------------------------------
+# =========================================================
 
 app.include_router(dashboard.router)
 app.include_router(components.router)
@@ -50,14 +56,18 @@ app.include_router(lots.router)
 app.include_router(predictions.router)
 app.include_router(risk.router)
 app.include_router(screening_runs.router)
+
+# Module B — Forecast
+app.include_router(forecast_router)
+
 app.include_router(reports.router)
 app.include_router(component_analysis.router)
 app.include_router(component_detail.router)
 
 
-# ---------------------------------------------------------
+# =========================================================
 # ROOT
-# ---------------------------------------------------------
+# =========================================================
 
 @app.get("/")
 def root():
@@ -67,9 +77,9 @@ def root():
     }
 
 
-# ---------------------------------------------------------
+# =========================================================
 # HEALTH CHECK
-# ---------------------------------------------------------
+# =========================================================
 
 @app.get("/api/health")
 def health():
@@ -77,6 +87,8 @@ def health():
         "status": "ok",
         "service": "Pleione backend",
     }
+
+
 # ============================================================
 # MODULE D — COMPONENT EXPLANATION
 # ============================================================
@@ -96,6 +108,7 @@ def get_component_explanation(component_id: str):
     Return Module D's generated explanation for one component.
 
     Module D is the source of explanation/rationale.
+
     This endpoint does not calculate anomaly, drift,
     prediction, risk, or screening decisions.
 
@@ -197,7 +210,6 @@ def get_component_explanation(component_id: str):
         flat = {}
 
         for column in df.columns:
-
             if column == "explanation_json":
                 continue
 
@@ -232,7 +244,6 @@ def get_component_explanation(component_id: str):
         ]
 
         for field in numeric_fields:
-
             if (
                 field in flat
                 and flat[field] is not None
@@ -254,14 +265,12 @@ def get_component_explanation(component_id: str):
         priority = None
 
         if MODULE_D_PRIORITY_FILE.exists():
-
             priority_df = pd.read_csv(
                 MODULE_D_PRIORITY_FILE,
                 dtype=str,
             )
 
             if "component_id" in priority_df.columns:
-
                 priority_df["component_id"] = (
                     priority_df["component_id"]
                     .fillna("")
@@ -275,7 +284,6 @@ def get_component_explanation(component_id: str):
                 ]
 
                 if not priority_matches.empty:
-
                     priority_row = (
                         priority_matches.iloc[0]
                     )
@@ -283,7 +291,6 @@ def get_component_explanation(component_id: str):
                     priority = {}
 
                     for column in priority_df.columns:
-
                         value = priority_row[column]
 
                         try:

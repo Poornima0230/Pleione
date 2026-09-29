@@ -1,0 +1,122 @@
+[
+  {
+    "run_id": "RUN-20260928-ACEAA8",
+    "created_at": "2026-09-28T17:41:35.984974+00:00",
+    "started_at": "2026-09-28T17:41:36.043837+00:00",
+    "completed_at": "2026-09-28T17:42:53.313595+00:00",
+    "status": "failed",
+    "current_stage": "module_c",
+    "lot_id": null,
+    "component_count": 10000,
+    "notes": "Started from Screening Runs dashboard.",
+    "error": "Module C completed, but the output file was not created or updated by the current screening run:\nC:\\Users\\peris\\Desktop\\SIH2k26\\data\\risk\\overall_risk_results.csv",
+    "error_detail": "Starting module_c\nPython: C:\\Users\\peris\\Desktop\\SIH2k26\\venv\\Scripts\\python.exe\nScript: C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\nWorking directory: C:\\Users\\peris\\Desktop\\SIH2k26\n----------------------------------------------------------------------\n\n\n\n======================================================================\nPLEIONE - RISK FUSION & EARLY SCREENING DECISION ENGINE\n======================================================================\n\nLoading configuration...\nConfiguration loaded successfully.\n\nRisk weights:\n  anomaly        : 0.3\n  drift          : 0.25\n  future         : 0.3\n  specification  : 0.15\n\nInternal risk classifications:\n  Pass: 0 - 30\n  Monitor: 30 - 60\n  Review: 60 - 100\n\nFinal screening outcomes:\n  PASS\n  REVIEW\n  REJECT\n\nChecking Module A cumulative stages...\n\nStages that WILL be processed:\n  stage_01.csv\n  stage_02.csv\n  stage_03.csv\n  stage_04.csv\n  stage_05.csv\n\nStages 6-10 are intentionally ignored because Module B currently has only 10,000 predictions.\n\nLoading Module B predictions...\nModule B rows: 10000\nModule B unique components: 10000\n\n======================================================================\nPROCESSING CUMULATIVE STAGE 1\n======================================================================\nModule A: data/module_A_results\\stage_01.csv\nTraceback (most recent call last):\n  File \"C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\", line 2492, in <module>\n    main()\n    ~~~~^^\n  File \"C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\", line 2204, in main\n    result_df, summary = process_stage(\n                         ~~~~~~~~~~~~~^\n    \n    \n    ...<6 lines>...\n        stage_number\n        ^^^^^^^^^^^^\n    )\n    ^\n  File \"C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\", line 1260, in process_stage\n    validate_module_a(\n    ~~~~~~~~~~~~~~~~~^\n        module_a_df,\n        ^^^^^^^^^^^^\n        module_a_path\n        ^^^^^^^^^^^^^\n    )\n    ^\n  File \"C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\", line 293, in validate_module_a\n    raise ValueError(\n    ...<7 lines>...\n    )\nValueError: \nModule A file 'data/module_A_results\\stage_01.csv' is missing columns:\n  - temporal_anomaly_score\n  - temporal_anomaly_flag\n  - statistical_evidence_count\n  - limit_violation\n  - limit_excess_uA\n",
+    "pipeline": {
+      "module_a": {
+        "status": "completed",
+        "error": null,
+        "exit_code": 0,
+        "error_detail": null,
+        "module": "Module A",
+        "artifact": {
+          "available": true,
+          "file": "data/module_A_anomaly_results.csv",
+          "modified_at": "2026-09-28T17:42:21.060421+00:00",
+          "size_bytes": 2642828,
+          "created_by_current_run": true
+        },
+        "components": 10000
+      },
+      "module_b": {
+        "status": "completed",
+        "error": null,
+        "exit_code": 0,
+        "error_detail": null,
+        "module": "Module B",
+        "artifact": {
+          "available": true,
+          "file": "data/module_B/module_B_drift_predictions.csv",
+          "modified_at": "2026-09-28T17:42:50.772198+00:00",
+          "size_bytes": 5381895,
+          "created_by_current_run": true
+        },
+        "components": 10000
+      },
+      "module_c": {
+        "status": "failed",
+        "error": "Module C completed, but the output file was not created or updated by the current screening run:\nC:\\Users\\peris\\Desktop\\SIH2k26\\data\\risk\\overall_risk_results.csv",
+        "exit_code": 1,
+        "error_detail": "Starting module_c\nPython: C:\\Users\\peris\\Desktop\\SIH2k26\\venv\\Scripts\\python.exe\nScript: C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\nWorking directory: C:\\Users\\peris\\Desktop\\SIH2k26\n----------------------------------------------------------------------\n\n\n\n======================================================================\nPLEIONE - RISK FUSION & EARLY SCREENING DECISION ENGINE\n======================================================================\n\nLoading configuration...\nConfiguration loaded successfully.\n\nRisk weights:\n  anomaly        : 0.3\n  drift          : 0.25\n  future         : 0.3\n  specification  : 0.15\n\nInternal risk classifications:\n  Pass: 0 - 30\n  Monitor: 30 - 60\n  Review: 60 - 100\n\nFinal screening outcomes:\n  PASS\n  REVIEW\n  REJECT\n\nChecking Module A cumulative stages...\n\nStages that WILL be processed:\n  stage_01.csv\n  stage_02.csv\n  stage_03.csv\n  stage_04.csv\n  stage_05.csv\n\nStages 6-10 are intentionally ignored because Module B currently has only 10,000 predictions.\n\nLoading Module B predictions...\nModule B rows: 10000\nModule B unique components: 10000\n\n======================================================================\nPROCESSING CUMULATIVE STAGE 1\n======================================================================\nModule A: data/module_A_results\\stage_01.csv\nTraceback (most recent call last):\n  File \"C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\", line 2492, in <module>\n    main()\n    ~~~~^^\n  File \"C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\", line 2204, in main\n    result_df, summary = process_stage(\n                         ~~~~~~~~~~~~~^\n    \n    \n    ...<6 lines>...\n        stage_number\n        ^^^^^^^^^^^^\n    )\n    ^\n  File \"C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\", line 1260, in process_stage\n    validate_module_a(\n    ~~~~~~~~~~~~~~~~~^\n        module_a_df,\n        ^^^^^^^^^^^^\n        module_a_path\n        ^^^^^^^^^^^^^\n    )\n    ^\n  File \"C:\\Users\\peris\\Desktop\\SIH2k26\\risk_engine.py\", line 293, in validate_module_a\n    raise ValueError(\n    ...<7 lines>...\n    )\nValueError: \nModule A file 'data/module_A_results\\stage_01.csv' is missing columns:\n  - temporal_anomaly_score\n  - temporal_anomaly_flag\n  - statistical_evidence_count\n  - limit_violation\n  - limit_excess_uA\n",
+        "module": "Module C",
+        "artifact": {
+          "available": true,
+          "file": "data/risk/overall_risk_results.csv",
+          "modified_at": "2026-09-28T16:38:34.214743+00:00",
+          "size_bytes": 7765942,
+          "created_by_current_run": false
+        },
+        "components": 10000
+      }
+    }
+  },
+  {
+    "run_id": "RUN-20260928-580D11",
+    "created_at": "2026-09-28T16:36:24.898902+00:00",
+    "started_at": "2026-09-28T16:36:24.941054+00:00",
+    "completed_at": "2026-09-28T16:38:35.166583+00:00",
+    "status": "completed",
+    "current_stage": "completed",
+    "lot_id": null,
+    "component_count": 10000,
+    "notes": "Started from Screening Runs dashboard.",
+    "error": null,
+    "error_detail": null,
+    "pipeline": {
+      "module_a": {
+        "status": "completed",
+        "error": null,
+        "exit_code": 0,
+        "error_detail": null,
+        "module": "Module A",
+        "artifact": {
+          "available": true,
+          "file": "data/module_A_anomaly_results.csv",
+          "modified_at": "2026-09-28T16:37:10.589171+00:00",
+          "size_bytes": 2642828,
+          "created_by_current_run": true
+        },
+        "components": 10000
+      },
+      "module_b": {
+        "status": "completed",
+        "error": null,
+        "exit_code": 0,
+        "error_detail": null,
+        "module": "Module B",
+        "artifact": {
+          "available": true,
+          "file": "data/module_B/module_B_drift_predictions.csv",
+          "modified_at": "2026-09-28T16:37:42.637710+00:00",
+          "size_bytes": 5381856,
+          "created_by_current_run": true
+        },
+        "components": 10000
+      },
+      "module_c": {
+        "status": "completed",
+        "error": null,
+        "exit_code": 0,
+        "error_detail": null,
+        "module": "Module C",
+        "artifact": {
+          "available": true,
+          "file": "data/risk/overall_risk_results.csv",
+          "modified_at": "2026-09-28T16:38:34.214743+00:00",
+          "size_bytes": 7765942,
+          "created_by_current_run": true
+        },
+        "components": 10000
+      }
+    }
+  }
+]

@@ -1,447 +1,854 @@
-from fastapi import APIRouter, HTTPException
-
 from pathlib import Path
+from threading import Lock
 
-import pandas as pd
 import numpy as np
+import pandas as pd
+
+from fastapi import APIRouter, HTTPException
 
 
 router = APIRouter(
     prefix="/api/component-analysis",
-    tags=["Component Analysis"]
-)
-
-
-BASE_DIR = Path(
-    __file__
-).resolve().parents[2]
-
-
-ANOMALY_FILE = (
-    BASE_DIR
-    / "data"
-    / "module_A_anomaly_results.csv"
-)
-
-PREDICTION_FILE = (
-    BASE_DIR
-    / "data"
-    / "module_B_drift_predictions.csv"
-)
-
-EXPLANATION_FILE = (
-    BASE_DIR
-    / "data"
-    / "module_D_explanations.csv"
+    tags=["Component Analysis"],
 )
 
 
 # ============================================================
-# JSON SAFE VALUE CONVERTER
+# BASE DIRECTORY
+# ============================================================
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+
+# ============================================================
+# PIPELINE OUTPUTS
+# ============================================================
+
+MODULE_A_FILE = (
+    BASE_DIR
+    / "data"
+    / "module_A"
+    / "module_A_all_predictions.csv"
+)
+
+MODULE_B_FILE = (
+    BASE_DIR
+    / "data"
+    / "module_B"
+    / "module_B_predictions.csv"
+)
+
+MODULE_C_FILE = (
+    BASE_DIR
+    / "data"
+    / "module_C"
+    / "module_C_all_results.csv"
+)
+
+
+# ============================================================
+# IN-MEMORY CACHE
+# ============================================================
+
+_CACHE = None
+_CACHE_SIGNATURE = None
+_CACHE_LOCK = Lock()
+
+
+# ============================================================
+# JSON CLEANING
 # ============================================================
 
 def clean_value(value):
+    """
+    Convert pandas / numpy values into JSON-safe values.
+    """
 
-    # None
     if value is None:
         return None
 
-    # NumPy boolean
     if isinstance(value, np.bool_):
         return bool(value)
 
-    # NumPy integer
     if isinstance(value, np.integer):
         return int(value)
 
-    # NumPy float
     if isinstance(value, np.floating):
-
         if np.isnan(value):
             return None
-
         return float(value)
 
-    # Python float NaN
     if isinstance(value, float):
-
         if pd.isna(value):
             return None
-
         return value
 
-    # Pandas NA / NaT
     try:
-
         if pd.isna(value):
             return None
-
     except (TypeError, ValueError):
         pass
 
-    # Dictionary
     if isinstance(value, dict):
-
         return {
             str(key): clean_value(val)
             for key, val in value.items()
         }
 
-    # List / tuple
     if isinstance(value, (list, tuple)):
-
         return [
             clean_value(item)
             for item in value
         ]
 
-    # NumPy array
     if isinstance(value, np.ndarray):
-
         return [
             clean_value(item)
             for item in value.tolist()
         ]
 
-    # Normal Python value
     return value
 
 
-# ============================================================
-# CONVERT PANDAS RECORD
-# ============================================================
-
 def clean_record(record):
+    """
+    Convert a pandas Series into a JSON-safe dictionary.
+    """
 
-    cleaned = {}
+    return {
+        str(column): clean_value(value)
+        for column, value in record.items()
+    }
 
-    for column, value in record.items():
 
-        cleaned[str(column)] = clean_value(
-            value
+# ============================================================
+# FILE SIGNATURE
+# ============================================================
+
+def get_file_signature(path: Path):
+    """
+    Used to detect whether a pipeline output changed.
+
+    If a CSV changes, the cache is automatically rebuilt.
+    """
+
+    if not path.exists():
+        return None
+
+    stat = path.stat()
+
+    return (
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
+
+
+def get_cache_signature():
+    return (
+        get_file_signature(MODULE_A_FILE),
+        get_file_signature(MODULE_B_FILE),
+        get_file_signature(MODULE_C_FILE),
+    )
+
+
+# ============================================================
+# CSV LOADING
+# ============================================================
+
+def load_csv(path: Path, source_name: str):
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"{source_name} output not found: "
+                f"{path}"
+            ),
         )
 
-    return cleaned
+    try:
+        return pd.read_csv(path)
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to read {source_name} output: "
+                f"{str(exc)}"
+            ),
+        )
 
 
 # ============================================================
-# COMPONENT ANALYSIS
+# INDEX BUILDING
+# ============================================================
+
+def build_index(df: pd.DataFrame, source_name: str):
+    """
+    Build:
+
+        component_id -> pandas Series
+
+    once.
+
+    This avoids filtering a 10,000-row DataFrame on every
+    component investigation request.
+    """
+
+    if "component_id" not in df.columns:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"{source_name} output does not contain "
+                "component_id"
+            ),
+        )
+
+    working = df.copy()
+
+    working["component_id"] = (
+        working["component_id"]
+        .astype(str)
+        .str.strip()
+    )
+
+    duplicates = working["component_id"].duplicated()
+
+    if duplicates.any():
+        duplicate_count = int(duplicates.sum())
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"{source_name} contains "
+                f"{duplicate_count} duplicate component_id "
+                "values."
+            ),
+        )
+
+    return {
+        row["component_id"]: row
+        for _, row in working.iterrows()
+    }
+
+
+# ============================================================
+# BUILD COMPLETE CACHE
+# ============================================================
+
+def build_cache():
+    """
+    Load all pipeline outputs once and create O(1)-style
+    component lookup indexes.
+    """
+
+    module_a_df = load_csv(
+        MODULE_A_FILE,
+        "Module A",
+    )
+
+    module_b_df = load_csv(
+        MODULE_B_FILE,
+        "Module B",
+    )
+
+    module_c_df = load_csv(
+        MODULE_C_FILE,
+        "Module C",
+    )
+
+    module_a_index = build_index(
+        module_a_df,
+        "Module A",
+    )
+
+    module_b_index = build_index(
+        module_b_df,
+        "Module B",
+    )
+
+    module_c_index = build_index(
+        module_c_df,
+        "Module C",
+    )
+
+    # --------------------------------------------------------
+    # Verify that the three pipeline outputs describe the
+    # same component population.
+    # --------------------------------------------------------
+
+    ids_a = set(module_a_index.keys())
+    ids_b = set(module_b_index.keys())
+    ids_c = set(module_c_index.keys())
+
+    if ids_a != ids_b:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Module A and Module B component IDs "
+                "do not match."
+            ),
+        )
+
+    if ids_a != ids_c:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Module A and Module C component IDs "
+                "do not match."
+            ),
+        )
+
+    return {
+        "module_a": module_a_index,
+        "module_b": module_b_index,
+        "module_c": module_c_index,
+        "count": len(ids_a),
+    }
+
+
+def get_pipeline_cache():
+    """
+    Return cached pipeline data.
+
+    The CSVs are only reloaded when their modification time
+    or file size changes.
+    """
+
+    global _CACHE
+    global _CACHE_SIGNATURE
+
+    current_signature = get_cache_signature()
+
+    if current_signature is None:
+        raise HTTPException(
+            status_code=404,
+            detail="One or more pipeline output files are missing.",
+        )
+
+    if (
+        _CACHE is not None
+        and _CACHE_SIGNATURE == current_signature
+    ):
+        return _CACHE
+
+    with _CACHE_LOCK:
+
+        # Another request may have rebuilt the cache while
+        # this request was waiting for the lock.
+        current_signature = get_cache_signature()
+
+        if (
+            _CACHE is not None
+            and _CACHE_SIGNATURE == current_signature
+        ):
+            return _CACHE
+
+        _CACHE = build_cache()
+        _CACHE_SIGNATURE = current_signature
+
+        return _CACHE
+
+
+# ============================================================
+# MODULE A
+# ============================================================
+
+def get_module_a_data(record):
+    """
+    Deployment-time anomaly evidence.
+
+    Module A uses 0H information only.
+    """
+
+    required_columns = [
+        "component_id",
+        "module_a_score",
+        "module_a_status",
+        "peer_source",
+    ]
+
+    missing = [
+        column
+        for column in required_columns
+        if column not in record.index
+    ]
+
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Module A output is missing required columns: "
+                + ", ".join(missing)
+            ),
+        )
+
+    component_fields = [
+        "component_id",
+        "lot_id",
+        "component_type",
+        "temperature_C",
+        "voltage_V",
+        "iddq_0h_uA",
+        "leakage_0h_uA",
+    ]
+
+    component = {}
+
+    for field in component_fields:
+        if field in record.index:
+            component[field] = clean_value(
+                record.get(field)
+            )
+
+    module_a_fields = [
+        "module_a_score",
+        "module_a_status",
+        "peer_source",
+    ]
+
+    module_a = {}
+
+    for field in module_a_fields:
+        if field in record.index:
+            module_a[field] = clean_value(
+                record.get(field)
+            )
+
+    return component, module_a
+
+
+# ============================================================
+# MODULE B
+# ============================================================
+
+def get_module_b_data(record):
+    """
+    Deployment-time future prediction.
+
+    Inputs are based on 0H + 24H.
+    """
+
+    allowed_fields = [
+
+        # Operating context
+        "component_id",
+        "lot_id",
+        "component_type",
+        "temperature_C",
+        "voltage_V",
+
+        # Early measurements
+        "iddq_0h_uA",
+        "iddq_24h_uA",
+        "leakage_0h_uA",
+        "leakage_24h_uA",
+        "delta_0_24",
+
+        # Prediction
+        "predicted_168h_uA",
+        "prediction_lower_uA",
+        "prediction_upper_uA",
+        "prediction_interval_width_uA",
+
+        # Future failure classifier
+        "failure_probability",
+        "predicted_future_violation",
+        "failure_risk",
+
+        # Specification
+        "absolute_limit_uA",
+    ]
+
+    prediction = {}
+
+    for field in allowed_fields:
+        if field in record.index:
+            prediction[field] = clean_value(
+                record.get(field)
+            )
+
+    return prediction
+
+
+# ============================================================
+# MODULE C
+# ============================================================
+
+def get_module_c_data(record):
+    """
+    Module C is the final screening decision.
+
+    It combines Module A + Module B + specification.
+    """
+
+    required_columns = [
+        "component_id",
+        "final_decision",
+        "future_risk",
+        "evidence_level",
+        "evidence_score",
+        "decision_reason",
+        "investigation_summary",
+        "recommended_action",
+    ]
+
+    missing = [
+        column
+        for column in required_columns
+        if column not in record.index
+    ]
+
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Module C output is missing required columns: "
+                + ", ".join(missing)
+            ),
+        )
+
+    # --------------------------------------------------------
+    # FINAL DECISION
+    # --------------------------------------------------------
+
+    risk = {
+        "component_id": clean_value(
+            record.get("component_id")
+        ),
+
+        "final_decision": clean_value(
+            record.get("final_decision")
+        ),
+
+        "future_risk": clean_value(
+            record.get("future_risk")
+        ),
+
+        "evidence_level": clean_value(
+            record.get("evidence_level")
+        ),
+
+        "evidence_score": clean_value(
+            record.get("evidence_score")
+        ),
+
+        # Human-readable explanation
+        "decision_reason": clean_value(
+            record.get("decision_reason")
+        ),
+
+        "investigation_summary": clean_value(
+            record.get("investigation_summary")
+        ),
+
+        "recommended_action": clean_value(
+            record.get("recommended_action")
+        ),
+    }
+
+    # --------------------------------------------------------
+    # Module A evidence carried into Module C
+    # --------------------------------------------------------
+
+    module_a_evidence_fields = [
+        "module_a_score",
+        "module_a_status",
+        "peer_source",
+        "module_a_watch_or_higher",
+        "module_a_anomalous",
+    ]
+
+    for field in module_a_evidence_fields:
+        if field in record.index:
+            risk[field] = clean_value(
+                record.get(field)
+            )
+
+    # --------------------------------------------------------
+    # Module B evidence carried into Module C
+    # --------------------------------------------------------
+
+    module_b_evidence_fields = [
+        "predicted_168h_uA",
+        "prediction_lower_uA",
+        "prediction_upper_uA",
+        "prediction_interval_width_uA",
+        "failure_probability",
+        "predicted_future_violation",
+        "failure_risk",
+        "absolute_limit_uA",
+    ]
+
+    for field in module_b_evidence_fields:
+        if field in record.index:
+            risk[field] = clean_value(
+                record.get(field)
+            )
+
+    # --------------------------------------------------------
+    # Evidence flags
+    # --------------------------------------------------------
+
+    evidence_flags = [
+        "point_prediction_exceeds_limit",
+        "uncertainty_crosses_limit",
+        "classifier_high_risk",
+        "classifier_medium_or_higher",
+    ]
+
+    for field in evidence_flags:
+        if field in record.index:
+            risk[field] = clean_value(
+                record.get(field)
+            )
+
+    return risk
+
+
+# ============================================================
+# INVESTIGATION OBJECT
+# ============================================================
+
+def build_investigation(
+    component,
+    module_a,
+    prediction,
+    risk,
+):
+    """
+    Build a frontend-friendly investigation object.
+
+    This intentionally duplicates the important final
+    decision fields so the UI does not need to understand
+    internal Module C nesting.
+    """
+
+    return {
+        "component_id": clean_value(
+            component.get("component_id")
+        ),
+
+        "lot_id": clean_value(
+            component.get("lot_id")
+        ),
+
+        "component_type": clean_value(
+            component.get("component_type")
+        ),
+
+        "temperature_C": clean_value(
+            component.get("temperature_C")
+        ),
+
+        "voltage_V": clean_value(
+            component.get("voltage_V")
+        ),
+
+        # ----------------------------------------------------
+        # Final decision
+        # ----------------------------------------------------
+
+        "final_decision": clean_value(
+            risk.get("final_decision")
+        ),
+
+        "future_risk": clean_value(
+            risk.get("future_risk")
+        ),
+
+        "evidence_level": clean_value(
+            risk.get("evidence_level")
+        ),
+
+        "evidence_score": clean_value(
+            risk.get("evidence_score")
+        ),
+
+        # ----------------------------------------------------
+        # Explanation
+        # ----------------------------------------------------
+
+        "decision_reason": clean_value(
+            risk.get("decision_reason")
+        ),
+
+        "investigation_summary": clean_value(
+            risk.get("investigation_summary")
+        ),
+
+        "recommended_action": clean_value(
+            risk.get("recommended_action")
+        ),
+
+        # ----------------------------------------------------
+        # Key prediction evidence
+        # ----------------------------------------------------
+
+        "failure_probability": clean_value(
+            prediction.get("failure_probability")
+        ),
+
+        "failure_risk": clean_value(
+            prediction.get("failure_risk")
+        ),
+
+        "predicted_168h_uA": clean_value(
+            prediction.get("predicted_168h_uA")
+        ),
+
+        "prediction_lower_uA": clean_value(
+            prediction.get("prediction_lower_uA")
+        ),
+
+        "prediction_upper_uA": clean_value(
+            prediction.get("prediction_upper_uA")
+        ),
+
+        "absolute_limit_uA": clean_value(
+            prediction.get("absolute_limit_uA")
+        ),
+    }
+
+
+# ============================================================
+# MAIN ENDPOINT
 # ============================================================
 
 @router.get("/{component_id}")
 def get_component_analysis(
-    component_id: str
+    component_id: str,
 ):
+    """
+    Return complete deployment-time investigation data
+    for one component.
+
+    Deployment-time information boundary:
+
+        Module A:
+            0H
+
+        Module B:
+            0H + 24H
+
+        Module C:
+            Module A + Module B + specification
+
+    Actual 96H / 168H measurements and ground truth are
+    never used as live decision inputs or returned here.
+    """
+
+    component_id = component_id.strip()
+
+    if not component_id:
+        raise HTTPException(
+            status_code=400,
+            detail="component_id cannot be empty",
+        )
 
     try:
 
         # ----------------------------------------------------
-        # CHECK MODULE A
+        # Get cached pipeline indexes
         # ----------------------------------------------------
 
-        if not ANOMALY_FILE.exists():
+        cache = get_pipeline_cache()
 
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    "Module A anomaly results "
-                    "not found"
-                )
-            )
-
+        module_a_index = cache["module_a"]
+        module_b_index = cache["module_b"]
+        module_c_index = cache["module_c"]
 
         # ----------------------------------------------------
-        # LOAD MODULE A
+        # Component existence
         # ----------------------------------------------------
 
-        anomaly_df = pd.read_csv(
-            ANOMALY_FILE
-        )
-
-
-        if "component_id" not in anomaly_df.columns:
-
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "component_id column missing "
-                    "from Module A results"
-                )
-            )
-
-
-        # ----------------------------------------------------
-        # FIND COMPONENT
-        # ----------------------------------------------------
-
-        result = anomaly_df[
-            anomaly_df["component_id"]
-            .astype(str)
-            == str(component_id)
-        ]
-
-
-        if result.empty:
-
+        if component_id not in module_a_index:
             raise HTTPException(
                 status_code=404,
                 detail=(
                     f"Component {component_id} "
-                    "was not found"
-                )
+                    "was not found in Module A output"
+                ),
             )
 
+        if component_id not in module_b_index:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Component {component_id} "
+                    "was not found in Module B output"
+                ),
+            )
+
+        if component_id not in module_c_index:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Component {component_id} "
+                    "was not found in Module C output"
+                ),
+            )
 
         # ----------------------------------------------------
-        # MODULE A RECORD
+        # Retrieve records
         # ----------------------------------------------------
 
-        record = result.iloc[0]
+        module_a_record = module_a_index[
+            component_id
+        ]
 
+        module_b_record = module_b_index[
+            component_id
+        ]
 
-        response = clean_record(
-            record.to_dict()
+        module_c_record = module_c_index[
+            component_id
+        ]
+
+        # ----------------------------------------------------
+        # Build response sections
+        # ----------------------------------------------------
+
+        component, module_a = get_module_a_data(
+            module_a_record
         )
 
-
-        # ====================================================
-        # MODULE B — FUTURE DRIFT PREDICTION
-        # ====================================================
-
-        response["prediction"] = None
-
-
-        if PREDICTION_FILE.exists():
-
-            prediction_df = pd.read_csv(
-                PREDICTION_FILE
-            )
-
-
-            if "component_id" in prediction_df.columns:
-
-                prediction_result = (
-                    prediction_df[
-                        prediction_df["component_id"]
-                        .astype(str)
-                        == str(component_id)
-                    ]
-                )
-
-
-                if not prediction_result.empty:
-
-                    prediction_record = (
-                        prediction_result.iloc[0]
-                    )
-
-
-                    prediction = (
-                        clean_record(
-                            prediction_record
-                            .to_dict()
-                        )
-                    )
-
-
-                    # Remove duplicate ID
-                    prediction.pop(
-                        "component_id",
-                        None
-                    )
-
-
-                    response["prediction"] = (
-                        prediction
-                    )
-
-
-        # ====================================================
-        # MODULE D — EXPLAINABILITY
-        # ====================================================
-
-        response["explanation"] = None
-
-        response["explainability"] = {}
-
-
-        if EXPLANATION_FILE.exists():
-
-            explanation_df = pd.read_csv(
-                EXPLANATION_FILE
-            )
-
-
-            if "component_id" in explanation_df.columns:
-
-                explanation_result = (
-                    explanation_df[
-                        explanation_df["component_id"]
-                        .astype(str)
-                        == str(component_id)
-                    ]
-                )
-
-
-                if not explanation_result.empty:
-
-                    explanation_record = (
-                        explanation_result.iloc[0]
-                    )
-
-
-                    # ----------------------------------------
-                    # MAIN EXPLANATION
-                    # ----------------------------------------
-
-                    possible_columns = [
-
-                        "detailed_explanation",
-
-                        "evidence_summary",
-
-                        "explanation",
-
-                        "reason",
-
-                        "anomaly_explanation",
-
-                        "model_explanation",
-
-                        "explanation_text",
-
-                    ]
-
-
-                    for column in possible_columns:
-
-                        if (
-                            column
-                            in explanation_df.columns
-                        ):
-
-                            value = (
-                                explanation_record[
-                                    column
-                                ]
-                            )
-
-
-                            cleaned = clean_value(
-                                value
-                            )
-
-
-                            if cleaned is not None:
-
-                                response[
-                                    "explanation"
-                                ] = str(cleaned)
-
-                                break
-
-
-                    # ----------------------------------------
-                    # OTHER EXPLAINABILITY DATA
-                    # ----------------------------------------
-
-                    for column in explanation_df.columns:
-
-                        if column == "component_id":
-                            continue
-
-
-                        value = (
-                            explanation_record[
-                                column
-                            ]
-                        )
-
-
-                        cleaned = clean_value(
-                            value
-                        )
-
-
-                        if cleaned is not None:
-
-                            response[
-                                "explainability"
-                            ][column] = cleaned
-
-
-        # ====================================================
-        # INVESTIGATION SUMMARY
-        # ====================================================
-
-        response["investigation"] = {
-
-            "component_id":
-                str(component_id),
-
-            "lot_id":
-                clean_value(
-                    record.get("lot_id")
-                ),
-
-            "detection_engine":
-                (
-                    "Statistical Deviation + "
-                    "Isolation Forest + "
-                    "Temporal Drift"
-                ),
-
-            "screening_decision":
-                clean_value(
-                    record.get(
-                        "screening_status"
-                    )
-                ),
-
-            "severity":
-                clean_value(
-                    record.get(
-                        "anomaly_severity"
-                    )
-                ),
-
-            "latent_risk":
-                clean_value(
-                    record.get(
-                        "latent_risk_flag"
-                    )
-                ),
-
-            "anomaly_detected":
-                clean_value(
-                    record.get(
-                        "combined_anomaly"
-                    )
-                ),
-
+        prediction = get_module_b_data(
+            module_b_record
+        )
+
+        risk = get_module_c_data(
+            module_c_record
+        )
+
+        investigation = build_investigation(
+            component,
+            module_a,
+            prediction,
+            risk,
+        )
+
+        # ----------------------------------------------------
+        # Final response
+        # ----------------------------------------------------
+
+        response = {
+            "component": component,
+            "module_a": module_a,
+            "prediction": prediction,
+            "risk": risk,
+            "investigation": investigation,
         }
 
-
-        # ====================================================
-        # FINAL SAFETY PASS
-        # ====================================================
-
-        response = clean_value(
-            response
-        )
-
-
-        return response
-
+        return clean_value(response)
 
     except HTTPException:
-
         raise
 
-
-    except Exception as e:
-
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=(
+                "Failed to load component analysis: "
+                f"{str(exc)}"
+            ),
         )

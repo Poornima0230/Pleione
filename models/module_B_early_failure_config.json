@@ -1,0 +1,46 @@
+{
+  "module": "B",
+  "purpose": "Early prediction of future 168h violation",
+  "input_features": [
+    "temperature_C",
+    "voltage_V",
+    "iddq_0h_uA",
+    "iddq_24h_uA",
+    "leakage_0h_uA",
+    "leakage_24h_uA",
+    "delta_0_24",
+    "component_type"
+  ],
+  "forbidden_features": [
+    "iddq_96h_uA",
+    "iddq_168h_uA",
+    "leakage_96h_uA",
+    "leakage_168h_uA",
+    "ground_truth",
+    "absolute_limit_uA",
+    "lot_id",
+    "component_id"
+  ],
+  "training_batches": [
+    "batch_1.csv",
+    "batch_2.csv",
+    "batch_3.csv"
+  ],
+  "test_batch": "batch_5.csv",
+  "all_prediction_batches": [
+    "batch_1.csv",
+    "batch_2.csv",
+    "batch_3.csv",
+    "batch_4.csv",
+    "batch_5.csv"
+  ],
+  "target": "future_168h_violation",
+  "target_definition": "iddq_168h_uA > absolute_limit_uA",
+  "model": "RandomForestClassifier",
+  "n_estimators": 500,
+  "max_features": "sqrt",
+  "min_samples_leaf": 3,
+  "class_weight": "balanced",
+  "random_state": 42,
+  "probability_threshold": 0.5
+}

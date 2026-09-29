@@ -1,0 +1,36 @@
+{
+  "module": "A",
+  "purpose": "0h peer-aware current-state anomaly detection",
+  "input_features": [
+    "temperature_C",
+    "voltage_V",
+    "component_type",
+    "iddq_0h_uA",
+    "leakage_0h_uA"
+  ],
+  "forbidden_features": [
+    "iddq_24h_uA",
+    "iddq_96h_uA",
+    "iddq_168h_uA",
+    "leakage_24h_uA",
+    "leakage_96h_uA",
+    "leakage_168h_uA",
+    "ground_truth",
+    "absolute_limit_uA",
+    "lot_id",
+    "component_id"
+  ],
+  "temp_bin_C": 1.0,
+  "voltage_bin_V": 0.05,
+  "watch_quantile": 0.95,
+  "anomalous_quantile": 0.99,
+  "watch_threshold": 1.9359967847051962,
+  "anomalous_threshold": 2.5936298008603025,
+  "score_formula": "0.70 * IDDQ robust z + 0.30 * leakage robust z",
+  "statuses": {
+    "NORMAL": "No meaningful 0h peer deviation",
+    "WATCH": "Moderate 0h peer deviation",
+    "ANOMALOUS": "Strong 0h peer deviation"
+  },
+  "important": "Module A status is anomaly evidence only. It is not the final PASS/REVIEW/REJECT decision."
+}

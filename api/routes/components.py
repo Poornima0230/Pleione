@@ -1,257 +1,484 @@
-from fastapi import APIRouter, HTTPException
 from pathlib import Path
+
 import pandas as pd
+from fastapi import APIRouter, Query
 
-from api.services.data_service import clean_records
+router = APIRouter(prefix="/api/components", tags=["components"])
 
 
-router = APIRouter(
-    prefix="/api/components",
-    tags=["Components"],
-)
-
+# ============================================================
+# PROJECT ROOT
+# ============================================================
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-ANOMALY_FILE = (
+MODULE_A_FILE = (
     BASE_DIR
     / "data"
-    / "module_A_anomaly_results.csv"
+    / "module_A"
+    / "module_A_all_predictions.csv"
+)
+
+MODULE_B_FILE = (
+    BASE_DIR
+    / "data"
+    / "module_B"
+    / "module_B_predictions.csv"
+)
+
+MODULE_C_FILE = (
+    BASE_DIR
+    / "data"
+    / "module_C"
+    / "module_C_all_results.csv"
 )
 
 
+# ============================================================
+# LOAD COMPLETE COMPONENT DATA
+# ============================================================
+
+def load_components() -> pd.DataFrame:
+    """
+    Load the complete 10,000-component screening dataset.
+
+    Module A:
+        0h anomaly evidence
+
+    Module B:
+        0h + 24h future prediction
+
+    Module C:
+        Final screening decision
+
+    All three outputs are merged using component_id.
+    """
+
+    # --------------------------------------------------------
+    # Check files
+    # --------------------------------------------------------
+
+    if not MODULE_A_FILE.exists():
+        raise FileNotFoundError(
+            f"Module A output not found: {MODULE_A_FILE}"
+        )
+
+    if not MODULE_B_FILE.exists():
+        raise FileNotFoundError(
+            f"Module B output not found: {MODULE_B_FILE}"
+        )
+
+    if not MODULE_C_FILE.exists():
+        raise FileNotFoundError(
+            f"Module C output not found: {MODULE_C_FILE}"
+        )
+
+    # --------------------------------------------------------
+    # Read model outputs
+    # --------------------------------------------------------
+
+    module_a = pd.read_csv(MODULE_A_FILE)
+    module_b = pd.read_csv(MODULE_B_FILE)
+    module_c = pd.read_csv(MODULE_C_FILE)
+
+    # --------------------------------------------------------
+    # Basic validation
+    # --------------------------------------------------------
+
+    if "component_id" not in module_a.columns:
+        raise ValueError(
+            "Module A output is missing component_id"
+        )
+
+    if "component_id" not in module_b.columns:
+        raise ValueError(
+            "Module B output is missing component_id"
+        )
+
+    if "component_id" not in module_c.columns:
+        raise ValueError(
+            "Module C output is missing component_id"
+        )
+
+    # --------------------------------------------------------
+    # Remove duplicate component IDs
+    # --------------------------------------------------------
+
+    module_a = module_a.drop_duplicates(
+        subset=["component_id"],
+        keep="last",
+    )
+
+    module_b = module_b.drop_duplicates(
+        subset=["component_id"],
+        keep="last",
+    )
+
+    module_c = module_c.drop_duplicates(
+        subset=["component_id"],
+        keep="last",
+    )
+
+    # --------------------------------------------------------
+    # Module A
+    # --------------------------------------------------------
+
+    module_a_columns = [
+        "component_id",
+        "lot_id",
+        "component_type",
+        "temperature_C",
+        "voltage_V",
+        "iddq_0h_uA",
+        "module_a_score",
+        "module_a_status",
+        "peer_source",
+    ]
+
+    module_a_columns = [
+        column
+        for column in module_a_columns
+        if column in module_a.columns
+    ]
+
+    module_a = module_a[module_a_columns].copy()
+
+    # --------------------------------------------------------
+    # Module B
+    # --------------------------------------------------------
+
+    module_b_columns = [
+        "component_id",
+        "iddq_24h_uA",
+        "predicted_168h_uA",
+        "prediction_upper_uA",
+        "failure_probability",
+        "failure_risk",
+    ]
+
+    module_b_columns = [
+        column
+        for column in module_b_columns
+        if column in module_b.columns
+    ]
+
+    module_b = module_b[module_b_columns].copy()
+
+    # --------------------------------------------------------
+    # Module C
+    # --------------------------------------------------------
+
+    module_c_columns = [
+        "component_id",
+        "absolute_limit_uA",
+        "final_decision",
+        "future_risk",
+        "evidence_level",
+        "evidence_score",
+        "decision_reason",
+        "investigation_summary",
+        "recommended_action",
+    ]
+
+    module_c_columns = [
+        column
+        for column in module_c_columns
+        if column in module_c.columns
+    ]
+
+    module_c = module_c[module_c_columns].copy()
+
+    # --------------------------------------------------------
+    # Merge Module A + Module B
+    # --------------------------------------------------------
+
+    data = module_a.merge(
+        module_b,
+        on="component_id",
+        how="left",
+        validate="one_to_one",
+    )
+
+    # --------------------------------------------------------
+    # Merge Module C
+    # --------------------------------------------------------
+
+    data = data.merge(
+        module_c,
+        on="component_id",
+        how="left",
+        validate="one_to_one",
+    )
+
+    # --------------------------------------------------------
+    # Validate final dataset
+    # --------------------------------------------------------
+
+    if len(data) != len(module_a):
+        raise ValueError(
+            "Component merge changed the number of Module A rows. "
+            f"Module A={len(module_a)}, merged={len(data)}"
+        )
+
+    # --------------------------------------------------------
+    # Normalize numeric columns
+    # --------------------------------------------------------
+
+    numeric_columns = [
+        "temperature_C",
+        "voltage_V",
+        "iddq_0h_uA",
+        "iddq_24h_uA",
+        "module_a_score",
+        "failure_probability",
+        "predicted_168h_uA",
+        "prediction_upper_uA",
+        "absolute_limit_uA",
+        "evidence_score",
+    ]
+
+    for column in numeric_columns:
+        if column in data.columns:
+            data[column] = pd.to_numeric(
+                data[column],
+                errors="coerce",
+            )
+
+    # --------------------------------------------------------
+    # Normalize text columns
+    # --------------------------------------------------------
+
+    text_columns = [
+        "component_id",
+        "lot_id",
+        "component_type",
+        "module_a_status",
+        "peer_source",
+        "failure_risk",
+        "final_decision",
+        "future_risk",
+        "evidence_level",
+        "decision_reason",
+        "investigation_summary",
+        "recommended_action",
+    ]
+
+    for column in text_columns:
+        if column in data.columns:
+            data[column] = (
+                data[column]
+                .fillna("")
+                .astype(str)
+            )
+
+    # --------------------------------------------------------
+    # Sort by component ID
+    # --------------------------------------------------------
+
+    if "component_id" in data.columns:
+        data = data.sort_values(
+            by="component_id",
+            kind="stable",
+        )
+
+    data = data.reset_index(drop=True)
+
+    return data
+
+
+# ============================================================
+# JSON-SAFE VALUE
+# ============================================================
+
+def clean_value(value):
+    """
+    Convert pandas values into JSON-safe values.
+    """
+
+    if pd.isna(value):
+        return None
+
+    if isinstance(value, float):
+        return round(value, 6)
+
+    return value
+
+
+# ============================================================
+# GET COMPONENTS
+# ============================================================
+
 @router.get("/")
 def get_components(
-    page: int = 1,
-    limit: int = 25,
-    component_id: str = "",
-    lot_id: str = "",
-    component_type: str = "",
-    screening_decision: str = "",
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=500),
+    component_id: str | None = None,
+    lot_id: str | None = None,
+    component_type: str | None = None,
+    screening_decision: str | None = None,
 ):
-    try:
-        # -----------------------------
-        # Pagination validation
-        # -----------------------------
+    """
+    Return paginated component screening data.
 
-        page = max(page, 1)
+    Default:
+        all 10,000 components
 
-        if limit < 1 or limit > 100:
-            limit = 25
+    Optional filters:
+        component_id
+        lot_id
+        component_type
+        screening_decision
+    """
 
-        # -----------------------------
-        # Load Module A results
-        # -----------------------------
+    # ========================================================
+    # LOAD ALL COMPONENTS
+    # ========================================================
 
-        if not ANOMALY_FILE.exists():
-            raise HTTPException(
-                status_code=404,
-                detail="Module A anomaly results not found",
-            )
+    data = load_components()
 
-        df = pd.read_csv(ANOMALY_FILE)
+    # Keep an unfiltered copy for filter options.
+    all_data = data.copy()
 
-        # -----------------------------
-        # Remove duplicate components
-        # -----------------------------
-        #
-        # A component must appear only once
-        # in the Components explorer.
-        #
-        # We keep the latest occurrence.
-        # -----------------------------
+    # ========================================================
+    # FILTER OPTIONS
+    # ========================================================
 
-        if "component_id" in df.columns:
-            df = df.drop_duplicates(
-                subset=["component_id"],
-                keep="last",
-            )
-
-        # -----------------------------
-        # Component ID search
-        # -----------------------------
-
-        if component_id.strip():
-            search_value = (
-                component_id
-                .strip()
-                .lower()
-            )
-
-            df = df[
-                df["component_id"]
-                .astype(str)
-                .str.lower()
-                .str.contains(
-                    search_value,
-                    na=False,
-                )
-            ]
-
-        # -----------------------------
-        # Lot filter
-        # -----------------------------
-
-        if lot_id.strip():
-            lot_value = (
-                lot_id
-                .strip()
-                .lower()
-            )
-
-            df = df[
-                df["lot_id"]
-                .astype(str)
-                .str.lower()
-                == lot_value
-            ]
-
-        # -----------------------------
-        # Component type filter
-        # -----------------------------
-
-        if component_type.strip():
-            type_value = (
-                component_type
-                .strip()
-                .lower()
-            )
-
-            df = df[
-                df["component_type"]
-                .astype(str)
-                .str.lower()
-                == type_value
-            ]
-
-        # -----------------------------
-        # Screening decision filter
-        # -----------------------------
-
-        if screening_decision.strip():
-            decision_value = (
-                screening_decision
-                .strip()
-                .upper()
-            )
-
-            df = df[
-                df["screening_decision"]
-                .astype(str)
-                .str.upper()
-                == decision_value
-            ]
-
-        # -----------------------------
-        # Total AFTER filters
-        # -----------------------------
-
-        total = len(df)
-
-        # -----------------------------
-        # Pagination
-        # -----------------------------
-
-        start = (page - 1) * limit
-        end = start + limit
-
-        page_data = df.iloc[start:end].copy()
-
-        # -----------------------------
-        # Fields required by Components
-        # -----------------------------
-
-        component_columns = [
-            "component_id",
-            "lot_id",
-            "component_type",
-
-            "temperature_C",
-            "voltage_V",
-
-            "iddq_0h_uA",
-            "iddq_24h_uA",
-            "iddq_96h_uA",
-            "iddq_168h_uA",
-
-            "anomaly_flag",
-            "combined_anomaly_score",
-
-            "risk_score_100",
-            "risk_level",
-
-            "limit_violation",
-            "screening_decision",
-
-            "explanation",
-        ]
-
-        available_columns = [
-            column
-            for column in component_columns
-            if column in page_data.columns
-        ]
-
-        page_data = page_data[
-            available_columns
-        ]
-
-        records = page_data.to_dict(
-            orient="records"
-        )
-
-        records = clean_records(records)
-
-        # -----------------------------
-        # Filter options
-        # -----------------------------
-
-        filter_options = {
-            "lots": sorted(
-                df["lot_id"]
+    filter_options = {
+        "lots": sorted(
+            [
+                value
+                for value in all_data["lot_id"]
                 .dropna()
-                .astype(str)
                 .unique()
-                .tolist()
-            ),
-            "component_types": sorted(
-                df["component_type"]
+                if str(value).strip()
+            ]
+        ),
+        "component_types": sorted(
+            [
+                value
+                for value in all_data["component_type"]
                 .dropna()
-                .astype(str)
                 .unique()
-                .tolist()
-            ),
-            "screening_decisions": sorted(
-                df["screening_decision"]
+                if str(value).strip()
+            ]
+        ),
+        "screening_decisions": [
+            value
+            for value in ["PASS", "REVIEW", "REJECT"]
+            if value in set(
+                all_data["final_decision"]
                 .dropna()
                 .astype(str)
                 .str.upper()
-                .unique()
-                .tolist()
-            ),
-        }
+            )
+        ],
+    }
 
-        # -----------------------------
-        # Response
-        # -----------------------------
+    # ========================================================
+    # COMPONENT ID FILTER
+    # ========================================================
 
-        return {
-            "total": int(total),
-
-            "page": int(page),
-
-            "limit": int(limit),
-
-            "filter_options": filter_options,
-
-            "data": records,
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e),
+    if component_id:
+        component_id_lower = (
+            component_id.strip().lower()
         )
+
+        data = data[
+            data["component_id"]
+            .str.lower()
+            .str.contains(
+                component_id_lower,
+                na=False,
+            )
+        ]
+
+    # ========================================================
+    # LOT FILTER
+    # ========================================================
+
+    if lot_id:
+        lot_id_lower = lot_id.strip().lower()
+
+        data = data[
+            data["lot_id"]
+            .str.lower()
+            == lot_id_lower
+        ]
+
+    # ========================================================
+    # COMPONENT TYPE FILTER
+    # ========================================================
+
+    if component_type:
+        component_type_lower = (
+            component_type.strip().lower()
+        )
+
+        data = data[
+            data["component_type"]
+            .str.lower()
+            == component_type_lower
+        ]
+
+    # ========================================================
+    # SCREENING DECISION FILTER
+    # ========================================================
+
+    if screening_decision:
+        decision_upper = (
+            screening_decision.strip().upper()
+        )
+
+        data = data[
+            data["final_decision"]
+            .str.upper()
+            == decision_upper
+        ]
+
+    # ========================================================
+    # PAGINATION
+    # ========================================================
+
+    total = len(data)
+
+    total_pages = (
+        (total + limit - 1) // limit
+        if total > 0
+        else 0
+    )
+
+    if total_pages > 0 and page > total_pages:
+        page = total_pages
+
+    start = (page - 1) * limit
+    end = start + limit
+
+    page_data = data.iloc[start:end].copy()
+
+    # ========================================================
+    # DATAFRAME → JSON
+    # ========================================================
+
+    records = []
+
+    for _, row in page_data.iterrows():
+
+        record = {
+            column: clean_value(row[column])
+            for column in page_data.columns
+        }
+
+        records.append(record)
+
+    # ========================================================
+    # RESPONSE
+    # ========================================================
+
+    return {
+        "data": records,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,
+        "filter_options": filter_options,
+    }
