@@ -15,7 +15,6 @@ from api.routes import (
     screening_runs,
     reports,
     component_analysis,
-    component_detail,
 )
 
 # Forecast router is imported directly because
@@ -62,7 +61,6 @@ app.include_router(forecast_router)
 
 app.include_router(reports.router)
 app.include_router(component_analysis.router)
-app.include_router(component_detail.router)
 
 
 # =========================================================

@@ -1,6 +1,0 @@
-stage,files_processed,components_processed,anomalies_detected,processing_measurement,output_file
-1,1,2000,4,iddq_0h_uA,data/module_A_results\stage_01.csv
-2,2,4000,6,iddq_0h_uA,data/module_A_results\stage_02.csv
-3,3,6000,9,iddq_0h_uA,data/module_A_results\stage_03.csv
-4,4,8000,10,iddq_0h_uA,data/module_A_results\stage_04.csv
-5,5,10000,24,iddq_0h_uA,data/module_A_results\stage_05.csv
