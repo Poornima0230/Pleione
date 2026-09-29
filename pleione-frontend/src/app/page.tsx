@@ -404,12 +404,9 @@ export default function CommandCenter() {
          * Supporting both keeps this page compatible with
          * the current API helper.
          */
-        const data =
-          response?.data && typeof response.data === "object"
-            ? response.data
-            : response;
+        const data = response as unknown as DashboardSummary;
 
-        setSummary(data as DashboardSummary);
+        setSummary(data);
       } catch (err) {
         if (cancelled) return;
 

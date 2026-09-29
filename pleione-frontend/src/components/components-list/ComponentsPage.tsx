@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 import ComponentsFilters from "./ComponentsFilters";
@@ -8,17 +8,41 @@ import ComponentsPagination from "./ComponentsPagination";
 import ComponentsTable from "./ComponentTable";
 
 import type { ComponentsResponse, ComponentRow } from "./types";
+
 import { getPageNumbers, PAGE_SIZE } from "./utils";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 export default function ComponentsPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-full bg-slate-50 text-slate-900 dark:bg-[#020618] dark:text-white">
+          <div className="mx-auto w-full max-w-[1600px] px-5 pb-10 pt-5 lg:px-7">
+            <div className="mb-6">
+              <div className="h-4 w-32 animate-pulse rounded bg-slate-200 dark:bg-slate-800" />
+              <div className="mt-3 h-8 w-48 animate-pulse rounded bg-slate-200 dark:bg-slate-800" />
+              <div className="mt-2 h-4 w-96 max-w-full animate-pulse rounded bg-slate-200 dark:bg-slate-800" />
+            </div>
+
+            <div className="h-24 animate-pulse rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900" />
+
+            <div className="mt-5 h-96 animate-pulse rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900" />
+          </div>
+        </main>
+      }
+    >
+      <ComponentsPageContent />
+    </Suspense>
+  );
+}
+
+function ComponentsPageContent() {
   const searchParams = useSearchParams();
 
   const [components, setComponents] = useState<ComponentRow[]>([]);
   const [total, setTotal] = useState(0);
   const [totalPagesFromApi, setTotalPagesFromApi] = useState(0);
-
   const [page, setPage] = useState(1);
 
   const [componentId, setComponentId] = useState("");

@@ -57,6 +57,7 @@ export default function LotDetailsPage() {
   useEffect(() => {
     if (!lotId) return;
 
+    const currentLotId = lotId;
     const controller = new AbortController();
 
     async function loadLot() {
@@ -65,7 +66,7 @@ export default function LotDetailsPage() {
         setError("");
 
         const response = await fetch(
-          `${API_BASE}/api/lots/${encodeURIComponent(lotId)}`,
+          `${API_BASE}/api/lots/${encodeURIComponent(currentLotId)}`,
           {
             signal: controller.signal,
             cache: "no-store",
@@ -74,7 +75,7 @@ export default function LotDetailsPage() {
 
         if (!response.ok) {
           if (response.status === 404) {
-            throw new Error(`Lot ${lotId} was not found.`);
+            throw new Error(`Lot ${currentLotId} was not found.`);
           }
 
           throw new Error(`Failed to load lot (${response.status})`);
